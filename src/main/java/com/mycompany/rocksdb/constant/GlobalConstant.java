@@ -5,7 +5,7 @@ public class GlobalConstant {
     // .1.
     public static final String ROCKS_FILE_SYSTEM_PREFIX_OFFSET = ROCKS_FILE_SYSTEM_PREFIX + "1" + ROCKS_FILE_SYSTEM_PREFIX;
     // 4KB
-    public static final int BLOCK_SIZE = 4 * 1024 * 1024;
+    public static final int BLOCK_SIZE = 4 * 1024 ;
     // 16 MB
     public static final int SPACE_SIZE = BLOCK_SIZE * BLOCK_SIZE;
     // 512

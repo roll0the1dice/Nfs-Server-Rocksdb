@@ -7,6 +7,8 @@ import reactor.util.function.Tuples;
 import java.io.File;
 import java.security.MessageDigest;
 
+import static com.mycompany.rocksdb.constant.GlobalConstant.VNODE_NUM;
+
 /**
  * MsVnodeUtils
  * Vnode相关工具类
@@ -98,5 +100,13 @@ public class MsVnodeUtils {
         String t2 = objBuilder.toString();
 
         return Tuples.of(t1, t2);
+    }
+
+    public static void main(String[] args) {
+        String bucket = "12321";
+        long vnodeNum = VNODE_NUM;
+
+        String targetVnodeId = MsVnodeUtils.getTargetVnodeId(bucket, vnodeNum);
+        System.out.println("targetVnodeId: " + targetVnodeId);
     }
 }

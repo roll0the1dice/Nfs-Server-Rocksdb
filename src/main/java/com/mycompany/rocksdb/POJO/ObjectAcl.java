@@ -12,7 +12,7 @@ import lombok.NoArgsConstructor;
 @Builder
 public class ObjectAcl {
     @JsonProperty("acl")
-    private int acl;
+    private String acl;
 
     @JsonProperty("owner")
     private String owner;

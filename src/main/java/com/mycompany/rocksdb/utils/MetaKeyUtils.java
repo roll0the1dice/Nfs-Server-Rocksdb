@@ -51,6 +51,15 @@ public class MetaKeyUtils {
                 : vnode + File.separator + bucket + File.separator + snapshotMark + File.separator + object;
     }
 
+    public static String getMetaDataKey(String vnode, String bucket, String object, String versionId, String stamp) {
+        return vnode + File.separator + bucket + File.separator + object + ZERO_STR + stamp + File.separator + versionId;
+    }
+
+    public static String getMetaDataKey(String vnode, String bucket, String object, String versionId, String stamp, String snapshotMark) {
+        return StringUtils.isBlank(snapshotMark) ? getMetaDataKey(vnode, bucket, object, versionId, stamp)
+                : vnode + File.separator + bucket + File.separator + snapshotMark + File.separator + object + ZERO_STR + File.separator + stamp + File.separator + versionId;
+    }
+
     public static String getObjFileName(String bucket, String object, String requestId) {
         Tuple2<String, String> tuple = MsVnodeUtils.getObjectVnodeId(bucket, object, VNODE_NUM);
 
@@ -65,8 +74,8 @@ public class MetaKeyUtils {
     }
 
     public static String getObjectVnodeId(String bucket, String object) {
-        //return MsVnodeUtils.getObjectVnodeId(bucket, object, VNODE_NUM).getT1();
-        return "4436";
+        return MsVnodeUtils.getObjectVnodeId(bucket, object, VNODE_NUM).getT1();
+        //return "4436";
     }
 
     public static String getFileMetaKey(String fileName) {
@@ -81,12 +90,16 @@ public class MetaKeyUtils {
     public static String getVersionNum() {
         long counter = globalCounter.incrementAndGet();
         long timestamp = System.currentTimeMillis();
-        return String.format("%019d%d-%d", counter, timestamp, 1000003).trim();
+        return String.format("%019d%d-%d", counter, timestamp, 1000001).trim();
     }
 
     public static String getshardingStamp() {
         long counter = globalCounter.incrementAndGet();
         long timestamp = System.currentTimeMillis();
-        return String.format("%019d%d-%d", counter, timestamp, 1000004).trim();
+        return String.format("%019d%d-%d", counter, timestamp, 1000002).trim();
+    }
+
+    public static String getTargetVnodeId(String bucketName) {
+        return MsVnodeUtils.getTargetVnodeId(bucketName, VNODE_NUM);
     }
 }

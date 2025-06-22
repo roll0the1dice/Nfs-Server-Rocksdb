@@ -11,13 +11,14 @@ import lombok.NoArgsConstructor;
 @NoArgsConstructor
 @Builder
 public class SysMetaData {
-  private String owner;
-
   @JsonProperty("Content-Length")
-  private Long contentLength;
+  private String contentLength;
 
   @JsonProperty("Content-Type")
   private String contentType;
+
+  @JsonProperty("owner")
+  private String owner;
 
   // 使用 @JsonProperty 将 JSON 中的 "Last-Modified" 映射到 Java 字段 "lastModified"
   @JsonProperty("Last-Modified")
@@ -27,6 +28,7 @@ public class SysMetaData {
   @JsonProperty("ETag")
   private String eTag;
 
+  @JsonProperty("displayName")
   private String displayName;
 
   @Override
