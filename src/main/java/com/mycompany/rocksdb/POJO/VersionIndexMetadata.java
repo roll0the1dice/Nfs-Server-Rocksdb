@@ -32,6 +32,9 @@ public class VersionIndexMetadata {
   @JsonProperty("fileName")
   private String fileName;
 
+//  @JsonProperty("startIndex")
+//  private long startIndex; // 使用 long 类型以防数字过大
+
   @JsonProperty("endIndex")
   private long endIndex; // 使用 long 类型以防数字过大
 

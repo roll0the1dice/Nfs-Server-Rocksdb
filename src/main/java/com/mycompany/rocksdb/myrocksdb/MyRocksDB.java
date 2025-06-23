@@ -1,0 +1,450 @@
+package com.mycompany.rocksdb.myrocksdb;
+
+import com.fasterxml.jackson.core.JsonParseException;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonMappingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.mycompany.rocksdb.FreeListSpaceManager;
+import com.mycompany.rocksdb.POJO.*;
+import com.mycompany.rocksdb.RocksDBInstanceWrapper;
+import com.mycompany.rocksdb.utils.MetaKeyUtils;
+import io.lettuce.core.RedisURI;
+import org.apache.commons.lang3.StringUtils;
+import org.rocksdb.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.*;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardOpenOption;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
+import io.lettuce.core.RedisClient;
+import io.lettuce.core.api.StatefulRedisConnection;
+import io.lettuce.core.api.sync.RedisCommands;
+
+import static com.mycompany.rocksdb.constant.GlobalConstant.BLOCK_SIZE;
+
+/**
+ * Hello world!
+ *
+ */
+public class MyRocksDB
+{
+    private static final Logger logger = LoggerFactory.getLogger(com.mycompany.rocksdb.myrocksdb.MyRocksDB.class);
+
+    static {
+        RocksDB.loadLibrary();
+    }
+
+    private static final String DB_PATH = "/fs-SP0-2/rocks_db"; // 数据库文件存放目录
+
+    private static final String INDEX_DB_PATH = "/fs-SP0-8-index/rocks_db";
+
+    private static final String E_TAG = "85c45b74e8753920570f6c9a01ca759b";
+
+    private static final Map<String, Map<String, ColumnFamilyHandle>> cfHandleMap = new ConcurrentHashMap<>();
+
+    public static Map<String, RocksDBInstanceWrapper> dbMap = new ConcurrentHashMap<>();
+
+    public static final long START_OFFSET = 2550000000L;
+
+    public static final FreeListSpaceManager manager = new FreeListSpaceManager(START_OFFSET);
+
+
+    public static final String INDEX_LUN = "fs-SP0-8-index";
+    public static final String DATA_LUN = "fs-SP0-2";
+    public static final Path SAVE_TO_DATA_PATH = Paths.get("/dev/sde2");
+
+    public void initRocksDB() {
+        List<String> lunList = Arrays.asList("fs-SP0-8-index", "fs-SP0-2");
+
+        lunList.stream().forEach(lun -> {
+            try {
+                RocksDBInstanceWrapper db = openRocksDB(lun, "/" + lun + "/rocks_db");
+                dbMap.put(lun, db);
+            } catch (RuntimeException e) {
+                logger.error("load rocks db with " + lun + " fail ", e);
+            }
+        });
+    }
+
+    public static RocksDBInstanceWrapper openRocksDB(String lun, String path) {
+
+        List<ColumnFamilyDescriptor> cfDescriptors = new ArrayList<>();
+        List<byte[]> cfNames = Collections.emptyList();
+
+        // 步骤 1: 使用静态方法 listColumnFamilies 列出所有列族名称
+        try {
+            cfNames = RocksDB.listColumnFamilies(new Options(), path);
+            if (cfNames.isEmpty()) {
+                // 如果为空，可能意味着数据库是新的，至少要添加 default 列族
+                cfNames.add(RocksDB.DEFAULT_COLUMN_FAMILY);
+            }
+        } catch (RocksDBException e) {
+            logger.info("列出列族失败: " + e.getMessage());
+            System.exit(-1);
+        }
+
+        logger.info("在路径 " + path + " 下发现的列族: " +
+                cfNames.stream().map(String::new).collect(Collectors.toList()));
+
+        // 步骤 2: 为每个列族创建一个 ColumnFamilyDescriptor
+        // 即使我们不打算使用它们，也必须在 open 时提供
+        // 每个 Descriptor 包含列族名称和其对应的选项
+        for (byte[] name : cfNames) {
+            MergeOperator mergeOperator = new com.macrosan.database.rocksdb.MossMergeOperator();
+            cfDescriptors.add(new ColumnFamilyDescriptor(name, new ColumnFamilyOptions().setMergeOperator(mergeOperator)));
+        }
+
+        List<ColumnFamilyHandle> cfHandles = new ArrayList<>();
+        // 2. 配置并打开数据库
+        // 使用 try-with-resources 语句可以确保资源（如 Options 和 RocksDB 实例）被自动关闭
+        //try (final Statistics statistics = new Statistics()) {
+        try (final DBOptions dbOptions = new DBOptions().setCreateIfMissing(true).setCreateMissingColumnFamilies(true)) {
+            // 如果目录不存在，创建它
+            File dbDir = new File(path);
+            if (!dbDir.exists()) {
+                System.exit(1);
+            }
+
+            RocksDB db = RocksDB.open(dbOptions, path, cfDescriptors, cfHandles);
+            logger.info("RocksDB 数据库已成功打开，位于: " + dbDir.getAbsolutePath());
+            Map<String, ColumnFamilyHandle> handleMap = cfHandleMap.compute(lun, (k, v) -> {
+                if (v == null) {
+                    v = new HashMap<>();
+                }
+                return v;
+            });
+            cfHandles.stream().forEach(columnFamilyHandle -> {
+                try {
+                    handleMap.put(new String(columnFamilyHandle.getName()), columnFamilyHandle);
+                } catch (RocksDBException e) {
+                    logger.info("rocksdb handle:{}", e.getMessage());
+                }
+            });
+
+            return new RocksDBInstanceWrapper(db, cfHandles);
+        } catch (RocksDBException e) {
+            throw new RuntimeException(e);
+        }
+        // }
+    }
+
+    public static void closeAllDBs() {
+        System.out.println("Starting to close all RocksDB instances and their handles...");
+        Exception shutdownException = null;
+
+        for (Map.Entry<String, RocksDBInstanceWrapper> entry : dbMap.entrySet()) {
+            String dbName = entry.getKey();
+            RocksDBInstanceWrapper wrapper = entry.getValue();
+
+            if (wrapper != null) {
+                try {
+                    System.out.println("Closing RocksDB wrapper for: " + dbName);
+                    wrapper.close(); // 调用封装类的关闭方法
+                    System.out.println("Successfully closed wrapper for: " + dbName);
+                } catch (Exception e) {
+                    System.err.println("Error closing wrapper for '" + dbName + "'.");
+                    if (shutdownException == null) {
+                        shutdownException = new RuntimeException("Failed to close one or more RocksDB wrappers.");
+                    }
+                    shutdownException.addSuppressed(e);
+                }
+            }
+        }
+
+        dbMap.clear();
+        System.out.println("Finished closing all RocksDB wrappers.");
+        if (shutdownException != null) {
+            throw (RuntimeException) shutdownException;
+        }
+    }
+
+    public void init() {
+        initRocksDB();
+
+        String data_lun = "fs-SP0-2";
+        long maxOffset = 0;
+        ObjectMapper objectMapper = new ObjectMapper();
+        RocksDBInstanceWrapper rocksDBInstanceWrapper = MyRocksDB.getRocksDB(data_lun);
+        RocksDB db = rocksDBInstanceWrapper.getRocksDB();
+        try (final RocksIterator iterator = db.newIterator()) {
+            // 4. 从第一个元素开始遍历
+            for (iterator.seekToFirst(); iterator.isValid(); iterator.next()) {
+                String key = new String(iterator.key(), StandardCharsets.UTF_8);
+                if (key.startsWith("#")) {
+                    String value = new String(iterator.value(), StandardCharsets.UTF_8);
+                    //System.out.println("Key: " + key + ", Value: " + value);.
+                    FileMetadata metadata = objectMapper.readValue(value, FileMetadata.class);
+                    Optional<Long> maxOptional = metadata.getOffset().stream().max(Comparator.naturalOrder());
+                    if (maxOptional.isPresent()) {
+                        maxOffset = Math.max(maxOffset, maxOptional.get());
+                    }
+                }
+            }
+
+        } catch (JsonMappingException e) {
+            throw new RuntimeException(e);
+        } catch (JsonParseException e) {
+            throw new RuntimeException(e);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+
+        if (maxOffset > 0) {
+            maxOffset = maxOffset / BLOCK_SIZE * BLOCK_SIZE + BLOCK_SIZE;
+            manager.setHighWaterMark(maxOffset);
+        }
+
+    }
+
+    public static void main(String[] args) throws IOException {
+        // 1. 静态加载 RocksDB JNI 库
+        // 这是使用 RocksDB Java API 的第一步，也是最重要的一步
+        //RocksDB.loadLibrary();
+        MyRocksDB myRocksDB = new MyRocksDB();
+        myRocksDB.init();
+
+        byte[] writeData = Files.readAllBytes(Paths.get("my-file.txt"));
+
+        try {
+            String bucket = "12321";
+            String targetVnodeId = MetaKeyUtils.getTargetVnodeId(bucket);
+            String object = "gadw.txt";
+            String requestId = MetaKeyUtils.getRequestId();
+            String filename = MetaKeyUtils.getObjFileName(bucket, object, requestId);
+            myRocksDB.saveMetaData(targetVnodeId, bucket, object, filename, writeData.length, "text/plain", true);
+
+            String vnodeId = MetaKeyUtils.getObjectVnodeId(bucket, object);
+            List<Long> link = Arrays.asList(((long)Long.parseLong(vnodeId)));
+            String s_uuid = "0002";
+            myRocksDB.saveRedis(vnodeId, link,  s_uuid);
+
+
+            String versionId = "null";
+            String versionKey = MetaKeyUtils.getVersionMetaDataKey(targetVnodeId, bucket, object, versionId);
+            myRocksDB.saveFileData(filename, versionKey, writeData.length, writeData, true);
+
+        } catch (Exception e) {
+            logger.error("operate db fail..");
+        }
+
+        MyRocksDB.closeAllDBs();
+    }
+
+
+    public static RocksDBInstanceWrapper getRocksDB(String lun) {
+        return dbMap.get(lun);
+    }
+
+    public long saveFileData(String fileName, String verisonKey, long length, byte[] payload, boolean isCreated) {
+        ObjectMapper objectMapper = new ObjectMapper();
+
+        String lun = DATA_LUN;
+        Path path = SAVE_TO_DATA_PATH;
+
+        if (!path.toFile().exists()) {
+            System.out.println("ERROR: device does not exist!");
+            System.exit(-1);
+        }
+
+        // 写入File数据
+        String fileMetaKey = MetaKeyUtils.getFileMetaKey(fileName);
+        long fileOffset = 0;
+        // 写入文件数据
+        try {
+            RocksDBInstanceWrapper rocksDBInstanceWrapper = MyRocksDB.getRocksDB(lun);
+            RocksDB db = rocksDBInstanceWrapper.getRocksDB();
+
+            byte[] value = db.get(fileMetaKey.getBytes(StandardCharsets.UTF_8));
+            Optional<FileMetadata> fileMetadata = Optional.empty();
+            if (value != null && !isCreated) {
+                fileMetadata = Optional.of(objectMapper.readValue(value, FileMetadata.class));
+//                FileMetadata fileMetadata = FileMetadata.builder().fileName(fileName).etag(E_TAG).size(0)
+//                        .metaKey(verisonKey).offset(new ArrayList<>()).len(new ArrayList<>()).lun(lun).build();
+                long len = length/BLOCK_SIZE*BLOCK_SIZE+BLOCK_SIZE;
+                fileOffset = manager.allocate(len).get();
+
+                try (FileChannel channel = FileChannel.open(path, StandardOpenOption.WRITE)) {
+                    ByteBuffer byteBuffer = ByteBuffer.wrap(payload);
+                    channel.write(byteBuffer, fileOffset);
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
+                fileMetadata.get().getOffset().add(fileOffset);
+                fileMetadata.get().getLen().add(len);
+                fileMetadata.get().setSize(fileMetadata.get().getSize() + length);
+            } else {
+                long len = length/BLOCK_SIZE*BLOCK_SIZE+BLOCK_SIZE;
+                fileOffset = manager.allocate(len).get();
+
+                try (FileChannel channel = FileChannel.open(path, StandardOpenOption.WRITE)) {
+                    ByteBuffer byteBuffer = ByteBuffer.wrap(payload);
+                    channel.write(byteBuffer, fileOffset);
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
+
+                fileMetadata = Optional.of(FileMetadata.builder().fileName(fileName).etag(E_TAG).size(length)
+                        .metaKey(verisonKey).offset(Arrays.asList(fileOffset)).len(Arrays.asList(len)).lun(lun).build());
+            }
+
+            db.put(fileMetaKey.getBytes(StandardCharsets.UTF_8), objectMapper.writeValueAsBytes(fileMetadata.get()));
+
+            return fileOffset;
+        } catch (JsonProcessingException | RocksDBException e) {
+            logger.error("write file data into disk fails...");
+            throw new RuntimeException(e);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    public void saveRedis(String vnodeId, List<Long> link, String s_uuid) {
+        String lun = DATA_LUN;
+        // 连接到本地 Redis 6号库
+        RedisURI redisURI = RedisURI.builder().withHost("localhost")
+                .withPort(6379)
+                .withPassword("Gw@uUp8tBedfrWDy".toCharArray())
+                .withDatabase(6)
+                .build();
+        RedisClient redisClient = RedisClient.create(redisURI);
+        StatefulRedisConnection<String, String> connection = redisClient.connect();
+        RedisCommands<String, String> commands = connection.sync();
+        // 写入数据
+        String redisKey = "dataa" + vnodeId;
+
+        commands.hset(redisKey, "v_num", vnodeId);
+        commands.hset(redisKey, "lun_name", lun);
+        commands.hset(redisKey, "link", link.toString());
+        commands.hset(redisKey, "s_uuid", s_uuid);
+        commands.hset(redisKey, "take_over", "0");
+
+        // 关闭连接
+        connection.close();
+        redisClient.shutdown();
+    }
+
+    public Optional<FileMetadata> getFileMetaData(String fileName) {
+        try {
+            ObjectMapper objectMapper = new ObjectMapper();
+
+            String lun = DATA_LUN;
+            Path path = SAVE_TO_DATA_PATH;
+
+            if (!path.toFile().exists()) {
+                System.out.println("ERROR: device does not exist!");
+                System.exit(-1);
+            }
+
+            // 写入File数据
+            String fileMetaKey = MetaKeyUtils.getFileMetaKey(fileName);
+            long fileOffset = 0;
+            // 写入文件数据
+            RocksDBInstanceWrapper rocksDBInstanceWrapper = MyRocksDB.getRocksDB(lun);
+            RocksDB db = rocksDBInstanceWrapper.getRocksDB();
+
+            byte[] value = db.get(fileMetaKey.getBytes(StandardCharsets.UTF_8));
+
+            return Optional.of(objectMapper.readValue(value, FileMetadata.class));
+        } catch (Exception e) {
+            logger.error("operate rocksdb fails..", e);
+        }
+        return Optional.empty();
+    }
+
+    public Optional<VersionIndexMetadata> getIndexMetaData(String targetVnodeId, String bucket, String object) {
+        try {
+            ObjectMapper objectMapper = new ObjectMapper();
+            String lun = INDEX_LUN;
+            String versionId = "null";
+            String verisonKey = MetaKeyUtils.getVersionMetaDataKey(targetVnodeId, bucket, object, versionId);
+            RocksDBInstanceWrapper rocksDBInstanceWrapper = MyRocksDB.getRocksDB(lun);
+            RocksDB db = rocksDBInstanceWrapper.getRocksDB();
+            byte[] value = db.get(verisonKey.getBytes(StandardCharsets.UTF_8));
+            if (value != null) {
+                VersionIndexMetadata versionIndexMetadata = objectMapper.readValue(value, VersionIndexMetadata.class);
+                return Optional.of(versionIndexMetadata);
+            }
+        } catch (Exception e) {
+            logger.error("operate rocksdb fails..", e);
+        }
+        return Optional.empty();
+    }
+
+    public void saveMetaData(String targetVnodeId, String bucket, String object, String fileName, long contentLength, String contentType, boolean isCreated) throws JsonProcessingException {
+        long maxOffset = 0;
+        ObjectMapper objectMapper = new ObjectMapper();
+
+        String lun = INDEX_LUN;
+        if (lun == null || StringUtils.isBlank(lun)) {
+            System.out.println("ERROR: device does not exist!");
+            System.exit(-1);
+        }
+
+        long timestamp = System.currentTimeMillis();
+        Instant instant = Instant.ofEpochMilli(timestamp);
+        DateTimeFormatter manualFormatter = DateTimeFormatter.ofPattern("EEE, dd MMM yyyy HH:mm:ss z", Locale.ENGLISH);
+        String formattedDate = manualFormatter.withZone(ZoneId.of("GMT")).format(instant);
+        String owner = "825301384323";
+
+        String versionId = "null";
+        String verisonKey = MetaKeyUtils.getVersionMetaDataKey(targetVnodeId, bucket, object, versionId);
+        String lifeCycleMetaKey = MetaKeyUtils.getLifeCycleMetaKey(targetVnodeId, bucket, object, versionId, String.valueOf(timestamp));
+        String latestMetaKey = MetaKeyUtils.getLatestMetaKey(targetVnodeId, bucket, object);
+        //
+        String metaKey = MetaKeyUtils.getMetaDataKey(targetVnodeId, bucket, object, "") + "0/null";
+
+        ObjectAcl objectAcl = ObjectAcl.builder().acl("256").owner(owner).build();
+        //String fileName = MetaKeyUtils.getObjFileName(bucket, object, requestId);
+        String versionNum = MetaKeyUtils.getVersionNum();
+        String syncStamp = versionNum;
+        String shardingStamp = MetaKeyUtils.getshardingStamp();
+
+        try {
+            RocksDBInstanceWrapper rocksDBInstanceWrapper = MyRocksDB.getRocksDB(lun);
+            RocksDB db = rocksDBInstanceWrapper.getRocksDB();
+            byte[] value = db.get(verisonKey.getBytes(StandardCharsets.UTF_8));
+            Optional<VersionIndexMetadata> versionIndexMetadata = Optional.empty();
+            if (value != null && !isCreated) {
+                versionIndexMetadata = Optional.of(objectMapper.readValue(value, VersionIndexMetadata.class));
+                SysMetaData sysMetaData = objectMapper.readValue(versionIndexMetadata.get().getSysMetaData(), SysMetaData.class);
+                contentLength = Long.parseLong(sysMetaData.getContentLength()) + contentLength;
+                long endIndex = contentLength - 1 < 20 ? 20 : contentLength - 1;
+                sysMetaData.setContentLength(String.valueOf(contentLength));
+                versionIndexMetadata.get().setSysMetaData(objectMapper.writeValueAsString(sysMetaData));
+                versionIndexMetadata.get().setEndIndex(endIndex);
+            } else {
+                long endIndex = contentLength - 1 < 0 ? 0 : contentLength - 1;
+                SysMetaData sysMetaData = SysMetaData.builder().contentLength(String.valueOf(contentLength))
+                        .contentType(contentType).lastModified(formattedDate.toString()).owner(owner).eTag(E_TAG).displayName("testuser").build();
+                versionIndexMetadata = Optional.of(VersionIndexMetadata.builder().sysMetaData(objectMapper.writeValueAsString(sysMetaData))
+                        .userMetaData("{\"x-amz-meta-cb-modifiedtime\":\"Thu, 17 Apr 2025 11:27:08 GMT\"}").objectAcl(objectMapper.writeValueAsString(objectAcl)).fileName(fileName).endIndex(endIndex)
+                        .versionNum(versionNum).syncStamp(syncStamp).shardingStamp(shardingStamp).stamp(timestamp)
+                        .storage("dataa").key(object).bucket(bucket).build());
+
+            }
+
+            LatestIndexMetadata latestIndexMetadata = VersionIndexMetadata.toLatestIndexMetadata(versionIndexMetadata.get());
+            IndexMetadata indexMetadata = VersionIndexMetadata.toIndexMetadata(versionIndexMetadata.get());
+            db.put(verisonKey.getBytes(StandardCharsets.UTF_8), objectMapper.writeValueAsBytes(versionIndexMetadata.get()));
+            db.put(lifeCycleMetaKey.getBytes(StandardCharsets.UTF_8), new byte[]{0});
+            db.put(latestMetaKey.getBytes(StandardCharsets.UTF_8), objectMapper.writeValueAsBytes(latestIndexMetadata));
+            db.put(metaKey.getBytes(StandardCharsets.UTF_8), objectMapper.writeValueAsBytes(indexMetadata));
+        } catch (Exception e) {
+            logger.error("operate rocksdb fails..", e);
+        }
+
+    }
+
+}
