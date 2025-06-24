@@ -310,7 +310,7 @@ public class MyRocksDB
         }
     }
 
-    public long saveFileData(String fileName, String verisonKey, Path sourcePath, long startWriteOffset, boolean isCreated) {
+    public long saveFileData(String fileName, String verisonKey, Path sourcePath, long startWriteOffset, long count, boolean isCreated) {
         ObjectMapper objectMapper = new ObjectMapper();
 
         String lun = DATA_LUN;
@@ -331,13 +331,12 @@ public class MyRocksDB
 
             byte[] value = db.get(fileMetaKey.getBytes(StandardCharsets.UTF_8));
             Optional<FileMetadata> fileMetadata = Optional.empty();
-            long length = sourcePath.toFile().length();
             if (value != null && !isCreated) {
                 fileMetadata = Optional.of(objectMapper.readValue(value, FileMetadata.class));
 //                FileMetadata fileMetadata = FileMetadata.builder().fileName(fileName).etag(E_TAG).size(0)
 //                        .metaKey(verisonKey).offset(new ArrayList<>()).len(new ArrayList<>()).lun(lun).build();
 
-                long len = length/BLOCK_SIZE*BLOCK_SIZE+BLOCK_SIZE;
+                long len = count /BLOCK_SIZE*BLOCK_SIZE+BLOCK_SIZE;
                 fileOffset = manager.allocate(len).get();
 
                 try (FileChannel sourceChannel = FileChannel.open(sourcePath, StandardOpenOption.READ);
@@ -345,38 +344,40 @@ public class MyRocksDB
                                                                                         StandardOpenOption.CREATE,
                                                                                         StandardOpenOption.TRUNCATE_EXISTING)) {
                     long byteTransferred = startWriteOffset;
-                    long fileSize = sourceChannel.size();
+                    long fileWrittenBytes= count;
                     destinationChannel.position(fileOffset);
 
-                    while (byteTransferred < fileSize) {
-                        byteTransferred += sourceChannel.transferTo(byteTransferred, fileSize - byteTransferred, destinationChannel);
+                    while (fileWrittenBytes > 0) {
+                        byteTransferred = sourceChannel.transferTo(byteTransferred, fileWrittenBytes, destinationChannel);
+                        fileWrittenBytes -= byteTransferred;
                     }
                 } catch (IOException e) {
                     throw new RuntimeException(e);
                 }
                 fileMetadata.get().getOffset().add(fileOffset);
                 fileMetadata.get().getLen().add(len);
-                fileMetadata.get().setSize(fileMetadata.get().getSize() + length);
+                fileMetadata.get().setSize(fileMetadata.get().getSize() + count);
             } else {
-                long len = length/BLOCK_SIZE*BLOCK_SIZE+BLOCK_SIZE;
+                long len = count /BLOCK_SIZE*BLOCK_SIZE+BLOCK_SIZE;
                 fileOffset = manager.allocate(len).get();
 
                 try (FileChannel sourceChannel = FileChannel.open(sourcePath, StandardOpenOption.READ);
                      FileChannel destinationChannel = FileChannel.open(destinationPath, StandardOpenOption.WRITE,
                              StandardOpenOption.CREATE,
                              StandardOpenOption.TRUNCATE_EXISTING)) {
-                    long byteTransferred = 0;
-                    long fileSize = sourceChannel.size();
+                    long byteTransferred = startWriteOffset;
+                    long fileWrittenBytes= count;
                     destinationChannel.position(fileOffset);
 
-                    while (byteTransferred < fileSize) {
-                        byteTransferred += sourceChannel.transferTo(byteTransferred, fileSize - byteTransferred, destinationChannel);
+                    while (fileWrittenBytes > 0) {
+                        byteTransferred = sourceChannel.transferTo(byteTransferred, fileWrittenBytes, destinationChannel);
+                        fileWrittenBytes -= byteTransferred;
                     }
                 } catch (IOException e) {
                     throw new RuntimeException(e);
                 }
 
-                fileMetadata = Optional.of(FileMetadata.builder().fileName(fileName).etag(E_TAG).size(length)
+                fileMetadata = Optional.of(FileMetadata.builder().fileName(fileName).etag(E_TAG).size(count)
                         .metaKey(verisonKey).offset(Arrays.asList(fileOffset)).len(Arrays.asList(len)).lun(lun).build());
             }
 

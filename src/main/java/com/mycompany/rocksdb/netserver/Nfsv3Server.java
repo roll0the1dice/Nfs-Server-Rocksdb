@@ -1051,20 +1051,11 @@ public class Nfsv3Server extends AbstractVerticle {
 
         if (attributes != null && object != null && requestId != null) {
 
-            fileHandleToFAttr3.computeIfPresent(byteArrayKeyWrapper, (key, value) -> {
-                synchronized (value) {
-                    int used = dataOfLength / BLOCK_SIZE * BLOCK_SIZE + BLOCK_SIZE;
-                    value.setSize(value.getSize() + dataOfLength);
-                    value.setUsed(used);
-                }
-                return value;
-            });
-
             fileHandleToOffset.compute(byteArrayKeyWrapper, (key, value) -> {
                if (value == null) {
                    value = new ConcurrentSkipListMap<>();
                }
-               value.put(offset, (long) count);
+               value.put(offset, (long) dataOfLength);
                return value;
             });
 
@@ -1093,7 +1084,7 @@ public class Nfsv3Server extends AbstractVerticle {
             WRITE3resok write3resok = WRITE3resok.builder()
                     .fileWcc(fileWcc)
                     .count(count)
-                    .committed(WRITE3resok.StableHow.DATA_SYNC)
+                    .committed(WRITE3resok.StableHow.UNSTABLE)
                     .verifier(0L)
                     .build();
 
@@ -1320,20 +1311,21 @@ public class Nfsv3Server extends AbstractVerticle {
         return fullResponseBuffer.array();
     }
 
-    private static Boolean readyToCombineBuffer(ConcurrentSkipListMap<Long, Long> currentData) {
-        long expectedOffset = -1;
+    private static synchronized long readyToCombineBuffer(ConcurrentSkipListMap<Long, Long> currentData) {
+        long expectedOffset = -1, count = 0;
         for (Map.Entry<Long, Long> entry : currentData.entrySet()) {
             if (expectedOffset == -1) {
                 expectedOffset = entry.getKey();
             }
             if (expectedOffset != entry.getKey()) {
                 log.error("expected offset is not equal to combined offset, expected offset: {}, combined offset: {}", expectedOffset, entry.getKey());
-                return false;
+                return -1;
             } else {
                 expectedOffset += entry.getValue();
+                count += entry.getValue();
             }
         }
-        return true;
+        return count;
     }
 
     private byte[] createNfsReadDirPlusReply(int xid, Buffer request, int startOffset) throws IOException {
@@ -1622,23 +1614,36 @@ public class Nfsv3Server extends AbstractVerticle {
 
         String object = fileHandleToFileName.get(keyWrapper);
         String requestId = fileHandleToRequestId.get(keyWrapper);
-        ConcurrentSkipListMap<Long, Long> currentData = fileHandleToOffset.get(keyWrapper);
+        ConcurrentSkipListMap<Long, Long> currentData = fileHandleToOffset.getOrDefault(keyWrapper, new ConcurrentSkipListMap<Long, Long>());
 
         COMMIT3res commit3res = null;
-        if (readyToCombineBuffer(currentData)) {
+
+        long count = readyToCombineBuffer(currentData);
+        if (count > 0) {
             String bucket = BUCK_NAME;
             String targetVnodeId = MetaKeyUtils.getTargetVnodeId(bucket);
             String filename = MetaKeyUtils.getObjFileName(bucket, object, requestId);
             String versionId = "null";
             String versionKey = MetaKeyUtils.getVersionMetaDataKey(targetVnodeId, bucket, object, versionId);
             Path sourcePath = Paths.get("/mgt/" + filename);
-            long dataOfLength = sourcePath.toFile().length();
-            myRocksDB.saveMetaData(targetVnodeId, bucket, object, filename, dataOfLength, "text/plain", false);
-            long startWriteOffset = currentData.lastKey();
-            long fileOffset = myRocksDB.saveFileData(filename, versionKey, sourcePath, startWriteOffset, false);
+            //long dataOfLength = sourcePath.toFile().length();
+            myRocksDB.saveMetaData(targetVnodeId, bucket, object, filename, count, "text/plain", false);
+            long startWriteOffset = currentData.firstKey();
+            long fileOffset = myRocksDB.saveFileData(filename, versionKey, sourcePath, startWriteOffset, count, false);
             sourcePath.toFile().deleteOnExit();
+            fileHandleToOffset.remove(keyWrapper);
+            log.info("startWriteOffset: {}, count: {}", startWriteOffset, count);
 
-            FAttr3 attritbutes = fileHandleToFAttr3.getOrDefault(keyWrapper, null);
+            FAttr3 attritbutes = fileHandleToFAttr3.computeIfPresent(keyWrapper, (key, value) -> {
+                synchronized (value) {
+                    long used = count / BLOCK_SIZE * BLOCK_SIZE + BLOCK_SIZE;
+                    value.setSize(value.getSize() + count);
+                    value.setUsed(used);
+                }
+                return value;
+            });
+
+            //FAttr3 attritbutes = fileHandleToFAttr3.getOrDefault(keyWrapper, null);
 
             PreOpAttr befor = PreOpAttr.builder().attributesFollow(0).build();
             PostOpAttr after = PostOpAttr.builder().attributesFollow(attritbutes != null ? 1 : 0).attributes(attritbutes).build();
@@ -1647,10 +1652,24 @@ public class Nfsv3Server extends AbstractVerticle {
             COMMIT3resok commit3resok = COMMIT3resok.builder().fileWcc(fileWcc).verifier(0L).build();
 
             commit3res = COMMIT3res.createSuccess(commit3resok);
-        } else {
-            WccData fileWcc = WccData.builder().build();
+        }
+        else if (count == -1) {
+            FAttr3 attritbutes = fileHandleToFAttr3.getOrDefault(keyWrapper, null);
+
+            PreOpAttr befor = PreOpAttr.builder().attributesFollow(0).build();
+            PostOpAttr after = PostOpAttr.builder().attributesFollow(attritbutes != null ? 1 : 0).attributes(attritbutes).build();
+
+            WccData fileWcc = WccData.builder().before(befor).after(after).build();
             COMMIT3resfail commit3resfail = COMMIT3resfail.builder().fileWcc(fileWcc).build();
-            commit3res = COMMIT3res.createFailure(NfsStat3.NFS3ERR_NOT_SYNC, commit3resfail);
+            commit3res = COMMIT3res.createFailure(NfsStat3.NFS3ERR_JUKEBOX, commit3resfail);
+        } else {
+            PreOpAttr befor = PreOpAttr.builder().attributesFollow(0).build();
+            PostOpAttr after = PostOpAttr.builder().attributesFollow(0).build();
+
+            WccData fileWcc = WccData.builder().before(befor).after(after).build();
+            COMMIT3resok commit3resok = COMMIT3resok.builder().fileWcc(fileWcc).verifier(0L).build();
+
+            commit3res = COMMIT3res.createSuccess(commit3resok);
         }
 
         int rpcNfsLength = commit3res.getSerializedSize();
