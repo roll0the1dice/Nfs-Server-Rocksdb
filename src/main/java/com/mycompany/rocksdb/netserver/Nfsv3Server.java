@@ -37,6 +37,7 @@ import java.nio.file.StandardOpenOption;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentSkipListMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -77,7 +78,7 @@ public class Nfsv3Server extends AbstractVerticle {
     private static final Map<ByteArrayKeyWrapper, ByteArrayKeyWrapper> fileHandleToParentFileHandle = new ConcurrentHashMap<>();
     private static final Map<ByteArrayKeyWrapper, List<ByteArrayKeyWrapper>> fileHandleToChildrenFileHandle = new ConcurrentHashMap<>();
     private static final Map<ByteArrayKeyWrapper, String> fileHandleToRequestId = new ConcurrentHashMap<>();
-    private static final Map<ByteArrayKeyWrapper, ConcurrentSkipListMap<Long, Long>> fileHandleToOffsetAndFileMetaOffset= new ConcurrentHashMap<>();
+    private static final Map<ByteArrayKeyWrapper, ConcurrentSkipListMap<Long, Long>> fileHandleToOffset= new ConcurrentHashMap<>();
 
     private static final Map<ByteArrayKeyWrapper, AtomicLong> fileHandleNextAppendingPosition = new ConcurrentHashMap<>();
 
@@ -937,36 +938,45 @@ public class Nfsv3Server extends AbstractVerticle {
         int fileType =  getFileType(name);
         ByteArrayKeyWrapper byteArrayKeyWrapper = new ByteArrayKeyWrapper(fhandle);
         String requestId = fileHandleToRequestId.get(byteArrayKeyWrapper);
-        long fileOffset = fileHandleToOffsetAndFileMetaOffset.get(byteArrayKeyWrapper).get(offset);
+        //long fileOffset = fileHandleToOffset.get(byteArrayKeyWrapper).get(offset);
 
         String bucket = BUCK_NAME;
         String targetVnodeId = MetaKeyUtils.getTargetVnodeId(bucket);
         String filename = MetaKeyUtils.getObjFileName(bucket, name, requestId);
-        FileMetadata fileMetadata = myRocksDB.getFileMetaData(filename).get();
-        List<Long> offsets = fileMetadata.getOffset();
-        List<Long> lens = fileMetadata.getLen();
+        Optional<FileMetadata> fileMetadataOptional = myRocksDB.getFileMetaData(filename);
+        Optional<READ3res> read3resOptinal = Optional.empty();
+        if (fileMetadataOptional.isPresent()) {
+            FileMetadata fileMetadata = fileMetadataOptional.get();
+            List<Long> offsets = fileMetadata.getOffset();
+            List<Long> lens = fileMetadata.getLen();
 
-        List<byte[]> dataList = readSegment(offsets, lens, count);
-        byte[] data = mergeWithByteBuffer(dataList);
-        int dataLength = data.length/4*4+4;
+            List<byte[]> dataList = readSegment(offsets, lens, count);
+            byte[] data = mergeWithByteBuffer(dataList);
+            int dataLength = data.length / 4 * 4 + 4;
 
 
-        FAttr3 fAttr3 = fileHandleToFAttr3.getOrDefault(new ByteArrayKeyWrapper(fhandle), null);
-        PostOpAttr fileAttributes = PostOpAttr.builder()
-                .attributesFollow(fAttr3 != null ? 1 : 0)
-                .attributes(fAttr3)
-                .build();
+            FAttr3 fAttr3 = fileHandleToFAttr3.getOrDefault(new ByteArrayKeyWrapper(fhandle), null);
+            PostOpAttr fileAttributes = PostOpAttr.builder()
+                    .attributesFollow(fAttr3 != null ? 1 : 0)
+                    .attributes(fAttr3)
+                    .build();
 
-        READ3resok read3resok = READ3resok.builder()
-                .fileAttributes(fileAttributes)
-                .count(dataLength)
-                .eof(1)
-                .dataOfLength(dataLength)
-                .data(data)
-                .build();
+            READ3resok read3resok = READ3resok.builder()
+                    .fileAttributes(fileAttributes)
+                    .count(dataLength)
+                    .eof(1)
+                    .dataOfLength(dataLength)
+                    .data(data)
+                    .build();
 
-        READ3res read3res = READ3res.createOk(read3resok);
+            read3resOptinal = Optional.of(READ3res.createOk(read3resok));
+        } else {
+            PostOpAttr fileAttributes = PostOpAttr.builder().attributesFollow(0).build();
+            READ3resfail read3resfail = READ3resfail.builder().fileAttributes(fileAttributes).build();
+            read3resOptinal = Optional.of(READ3res.createFail(NfsStat3.NFS3ERR_NOENT, read3resfail));
+        }
 
+        READ3res read3res = read3resOptinal.get();
         int rpcNfsLength = read3res.getSerializedSize();
         ByteBuffer rpcNfsBuffer = ByteBuffer.allocate(rpcNfsLength);
         rpcNfsBuffer.order(ByteOrder.BIG_ENDIAN);
@@ -1041,7 +1051,6 @@ public class Nfsv3Server extends AbstractVerticle {
 
         if (attributes != null && object != null && requestId != null) {
 
-
             fileHandleToFAttr3.computeIfPresent(byteArrayKeyWrapper, (key, value) -> {
                 synchronized (value) {
                     int used = dataOfLength / BLOCK_SIZE * BLOCK_SIZE + BLOCK_SIZE;
@@ -1051,25 +1060,31 @@ public class Nfsv3Server extends AbstractVerticle {
                 return value;
             });
 
+            fileHandleToOffset.compute(byteArrayKeyWrapper, (key, value) -> {
+               if (value == null) {
+                   value = new ConcurrentSkipListMap<>();
+               }
+               value.put(offset, (long) count);
+               return value;
+            });
 
             String bucket = BUCK_NAME;
             String targetVnodeId = MetaKeyUtils.getTargetVnodeId(bucket);
             String filename = MetaKeyUtils.getObjFileName(bucket, object, requestId);
             String versionId = "null";
             String versionKey = MetaKeyUtils.getVersionMetaDataKey(targetVnodeId, bucket, object, versionId);
-            myRocksDB.saveMetaData(targetVnodeId, bucket, object, filename, dataOfLength, "text/plain", false);
-            long fileOffset = myRocksDB.saveFileData(filename, versionKey, dataOfLength, data, false);
-
-
-
-            fileHandleToOffsetAndFileMetaOffset.compute(byteArrayKeyWrapper, (key, value) -> {
-                if (value == null) {
-                    value = new ConcurrentSkipListMap<>();
-                }
-                value.put(offset, fileOffset);
-                return value;
-            });
-
+            //myRocksDB.saveMetaData(targetVnodeId, bucket, object, filename, dataOfLength, "text/plain", false);
+            //long fileOffset = myRocksDB.saveFileData(filename, versionKey, dataOfLength, data, false);
+            Path path = Paths.get("/mgt/"+filename);
+            if (!path.toFile().exists()) {
+                Files.createFile(path);
+            }
+            try (FileChannel channel = FileChannel.open(path, StandardOpenOption.WRITE)) {
+                ByteBuffer byteBuffer = ByteBuffer.wrap(data);
+                channel.write(byteBuffer, offset);
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
 
             PreOpAttr before = PreOpAttr.builder().attributesFollow(0).build();
             PostOpAttr after = PostOpAttr.builder().attributesFollow(1).attributes(attributes).build();
@@ -1303,6 +1318,22 @@ public class Nfsv3Server extends AbstractVerticle {
         fullResponseBuffer.put(rpcNfsBuffer.array());
 
         return fullResponseBuffer.array();
+    }
+
+    private static Boolean readyToCombineBuffer(ConcurrentSkipListMap<Long, Long> currentData) {
+        long expectedOffset = -1;
+        for (Map.Entry<Long, Long> entry : currentData.entrySet()) {
+            if (expectedOffset == -1) {
+                expectedOffset = entry.getKey();
+            }
+            if (expectedOffset != entry.getKey()) {
+                log.error("expected offset is not equal to combined offset, expected offset: {}, combined offset: {}", expectedOffset, entry.getKey());
+                return false;
+            } else {
+                expectedOffset += entry.getValue();
+            }
+        }
+        return true;
     }
 
     private byte[] createNfsReadDirPlusReply(int xid, Buffer request, int startOffset) throws IOException {
@@ -1589,18 +1620,38 @@ public class Nfsv3Server extends AbstractVerticle {
             return v;
         });
 
+        String object = fileHandleToFileName.get(keyWrapper);
+        String requestId = fileHandleToRequestId.get(keyWrapper);
+        ConcurrentSkipListMap<Long, Long> currentData = fileHandleToOffset.get(keyWrapper);
+
         COMMIT3res commit3res = null;
+        if (readyToCombineBuffer(currentData)) {
+            String bucket = BUCK_NAME;
+            String targetVnodeId = MetaKeyUtils.getTargetVnodeId(bucket);
+            String filename = MetaKeyUtils.getObjFileName(bucket, object, requestId);
+            String versionId = "null";
+            String versionKey = MetaKeyUtils.getVersionMetaDataKey(targetVnodeId, bucket, object, versionId);
+            Path sourcePath = Paths.get("/mgt/" + filename);
+            long dataOfLength = sourcePath.toFile().length();
+            myRocksDB.saveMetaData(targetVnodeId, bucket, object, filename, dataOfLength, "text/plain", false);
+            long startWriteOffset = currentData.lastKey();
+            long fileOffset = myRocksDB.saveFileData(filename, versionKey, sourcePath, startWriteOffset, false);
+            sourcePath.toFile().deleteOnExit();
 
-        FAttr3 attritbutes = fileHandleToFAttr3.getOrDefault(keyWrapper, null);
+            FAttr3 attritbutes = fileHandleToFAttr3.getOrDefault(keyWrapper, null);
 
-        PreOpAttr befor = PreOpAttr.builder().attributesFollow(0).build();
-        PostOpAttr after = PostOpAttr.builder().attributesFollow(attritbutes != null ? 1 : 0).attributes(attritbutes).build();
+            PreOpAttr befor = PreOpAttr.builder().attributesFollow(0).build();
+            PostOpAttr after = PostOpAttr.builder().attributesFollow(attritbutes != null ? 1 : 0).attributes(attritbutes).build();
 
-        WccData fileWcc =  WccData.builder().before(befor).after(after).build();
-        COMMIT3resok commit3resok = COMMIT3resok.builder().fileWcc(fileWcc).verifier(0L).build();
+            WccData fileWcc = WccData.builder().before(befor).after(after).build();
+            COMMIT3resok commit3resok = COMMIT3resok.builder().fileWcc(fileWcc).verifier(0L).build();
 
-        commit3res = COMMIT3res.createSuccess(commit3resok);
-
+            commit3res = COMMIT3res.createSuccess(commit3resok);
+        } else {
+            WccData fileWcc = WccData.builder().build();
+            COMMIT3resfail commit3resfail = COMMIT3resfail.builder().fileWcc(fileWcc).build();
+            commit3res = COMMIT3res.createFailure(NfsStat3.NFS3ERR_NOT_SYNC, commit3resfail);
+        }
 
         int rpcNfsLength = commit3res.getSerializedSize();
         ByteBuffer rpcNfsBuffer = ByteBuffer.allocate(rpcNfsLength);
