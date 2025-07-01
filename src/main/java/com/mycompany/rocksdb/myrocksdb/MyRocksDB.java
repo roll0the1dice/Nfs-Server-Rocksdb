@@ -27,6 +27,7 @@ import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 import io.lettuce.core.RedisClient;
 import io.lettuce.core.api.StatefulRedisConnection;
@@ -58,15 +59,20 @@ public class MyRocksDB
 
     public static final long START_OFFSET = 2550000000L;
 
-    public static final FreeListSpaceManager manager = new FreeListSpaceManager(START_OFFSET);
+    //public static final FreeListSpaceManager manager = new FreeListSpaceManager(START_OFFSET);
 
+    public final AtomicLong offsetAllocator = new AtomicLong(START_OFFSET);
 
-    public static final String INDEX_LUN = "fs-SP0-8-index";
-    public static final String DATA_LUN = "fs-SP0-2";
-    public static final Path SAVE_TO_DATA_PATH = Paths.get("/dev/sde2");
+    public static final String INDEX_LUN = "fs-SP0-7-index";
+    public static final String DATA_LUN = "fs-SP0-6";
+    public static final Path SAVE_TO_DATA_PATH = Paths.get("/dev/sdh2");
+
+    public MyRocksDB() {
+        init();
+    }
 
     public void initRocksDB() {
-        List<String> lunList = Arrays.asList("fs-SP0-8-index", "fs-SP0-2");
+        List<String> lunList = Arrays.asList(INDEX_LUN, DATA_LUN);
 
         lunList.stream().forEach(lun -> {
             try {
@@ -173,7 +179,7 @@ public class MyRocksDB
     public void init() {
         initRocksDB();
 
-        String data_lun = "fs-SP0-2";
+        String data_lun = DATA_LUN;
         long maxOffset = 0;
         ObjectMapper objectMapper = new ObjectMapper();
         RocksDBInstanceWrapper rocksDBInstanceWrapper = MyRocksDB.getRocksDB(data_lun);
@@ -203,7 +209,7 @@ public class MyRocksDB
 
         if (maxOffset > 0) {
             maxOffset = maxOffset / BLOCK_SIZE * BLOCK_SIZE + BLOCK_SIZE;
-            manager.setHighWaterMark(maxOffset);
+            offsetAllocator.set(maxOffset);
         }
 
     }
@@ -223,7 +229,7 @@ public class MyRocksDB
             String object = "gadw.txt";
             String requestId = MetaKeyUtils.getRequestId();
             String filename = MetaKeyUtils.getObjFileName(bucket, object, requestId);
-            myRocksDB.saveMetaData(targetVnodeId, bucket, object, filename, writeData.length, "text/plain", true);
+            myRocksDB.saveIndexMetaData(targetVnodeId, bucket, object, filename, writeData.length, "text/plain", true);
 
             String vnodeId = MetaKeyUtils.getObjectVnodeId(bucket, object);
             List<Long> link = Arrays.asList(((long)Long.parseLong(vnodeId)));
@@ -233,7 +239,7 @@ public class MyRocksDB
 
             String versionId = "null";
             String versionKey = MetaKeyUtils.getVersionMetaDataKey(targetVnodeId, bucket, object, versionId);
-            myRocksDB.saveFileData(filename, versionKey, writeData.length, writeData, true);
+            //myRocksDB.saveFileData(filename, versionKey, writeData.length, writeData, true);
 
         } catch (Exception e) {
             logger.error("operate db fail..");
@@ -247,80 +253,75 @@ public class MyRocksDB
         return dbMap.get(lun);
     }
 
-    public long saveFileData(String fileName, String verisonKey, long length, byte[] payload, boolean isCreated) {
-        ObjectMapper objectMapper = new ObjectMapper();
+//    public long saveFileData(String fileName, String verisonKey, long length, byte[] payload, boolean isCreated) {
+//        ObjectMapper objectMapper = new ObjectMapper();
+//
+//        String lun = DATA_LUN;
+//        Path path = SAVE_TO_DATA_PATH;
+//
+//        if (!path.toFile().exists()) {
+//            System.out.println("ERROR: device does not exist!");
+//            System.exit(-1);
+//        }
+//
+//        // 写入File数据
+//        String fileMetaKey = MetaKeyUtils.getFileMetaKey(fileName);
+//        long fileOffset = 0;
+//        // 写入文件数据
+//        try {
+//            RocksDBInstanceWrapper rocksDBInstanceWrapper = MyRocksDB.getRocksDB(lun);
+//            RocksDB db = rocksDBInstanceWrapper.getRocksDB();
+//
+//            byte[] value = db.get(fileMetaKey.getBytes(StandardCharsets.UTF_8));
+//            Optional<FileMetadata> fileMetadata = Optional.empty();
+//            if (value != null && !isCreated) {
+//                fileMetadata = Optional.of(objectMapper.readValue(value, FileMetadata.class));
+    ////                FileMetadata fileMetadata = FileMetadata.builder().fileName(fileName).etag(E_TAG).size(0)
+    ////                        .metaKey(verisonKey).offset(new ArrayList<>()).len(new ArrayList<>()).lun(lun).build();
+//                long len = length/BLOCK_SIZE*BLOCK_SIZE+BLOCK_SIZE;
+//                fileOffset = manager.allocate(len).get();
+//
+//                try (FileChannel channel = FileChannel.open(path, StandardOpenOption.WRITE)) {
+//                    ByteBuffer byteBuffer = ByteBuffer.wrap(payload);
+//                    channel.write(byteBuffer, fileOffset);
+//                } catch (IOException e) {
+//                    throw new RuntimeException(e);
+//                }
+//                fileMetadata.get().getOffset().add(fileOffset);
+//                fileMetadata.get().getLen().add(len);
+//                fileMetadata.get().setSize(fileMetadata.get().getSize() + length);
+//            } else {
+//                long len = length/BLOCK_SIZE*BLOCK_SIZE+BLOCK_SIZE;
+//                fileOffset = manager.allocate(len).get();
+//
+//                try (FileChannel channel = FileChannel.open(path, StandardOpenOption.WRITE)) {
+//                    ByteBuffer byteBuffer = ByteBuffer.wrap(payload);
+//                    channel.write(byteBuffer, fileOffset);
+//                } catch (IOException e) {
+//                    throw new RuntimeException(e);
+//                }
+//
+//                fileMetadata = Optional.of(FileMetadata.builder().fileName(fileName).etag(E_TAG).size(length)
+//                        .metaKey(verisonKey).offset(Arrays.asList(fileOffset)).len(Arrays.asList(len)).lun(lun).build());
+//            }
+//
+//            db.put(fileMetaKey.getBytes(StandardCharsets.UTF_8), objectMapper.writeValueAsBytes(fileMetadata.get()));
+//
+//            return fileOffset;
+//        } catch (JsonProcessingException | RocksDBException e) {
+//            logger.error("write file data into disk fails...");
+//            throw new RuntimeException(e);
+//        } catch (IOException e) {
+//            throw new RuntimeException(e);
+//        }
+//    }
 
-        String lun = DATA_LUN;
-        Path path = SAVE_TO_DATA_PATH;
-
-        if (!path.toFile().exists()) {
-            System.out.println("ERROR: device does not exist!");
-            System.exit(-1);
-        }
-
-        // 写入File数据
-        String fileMetaKey = MetaKeyUtils.getFileMetaKey(fileName);
-        long fileOffset = 0;
-        // 写入文件数据
-        try {
-            RocksDBInstanceWrapper rocksDBInstanceWrapper = MyRocksDB.getRocksDB(lun);
-            RocksDB db = rocksDBInstanceWrapper.getRocksDB();
-
-            byte[] value = db.get(fileMetaKey.getBytes(StandardCharsets.UTF_8));
-            Optional<FileMetadata> fileMetadata = Optional.empty();
-            if (value != null && !isCreated) {
-                fileMetadata = Optional.of(objectMapper.readValue(value, FileMetadata.class));
-//                FileMetadata fileMetadata = FileMetadata.builder().fileName(fileName).etag(E_TAG).size(0)
-//                        .metaKey(verisonKey).offset(new ArrayList<>()).len(new ArrayList<>()).lun(lun).build();
-                long len = length/BLOCK_SIZE*BLOCK_SIZE+BLOCK_SIZE;
-                fileOffset = manager.allocate(len).get();
-
-                try (FileChannel channel = FileChannel.open(path, StandardOpenOption.WRITE)) {
-                    ByteBuffer byteBuffer = ByteBuffer.wrap(payload);
-                    channel.write(byteBuffer, fileOffset);
-                } catch (IOException e) {
-                    throw new RuntimeException(e);
-                }
-                fileMetadata.get().getOffset().add(fileOffset);
-                fileMetadata.get().getLen().add(len);
-                fileMetadata.get().setSize(fileMetadata.get().getSize() + length);
-            } else {
-                long len = length/BLOCK_SIZE*BLOCK_SIZE+BLOCK_SIZE;
-                fileOffset = manager.allocate(len).get();
-
-                try (FileChannel channel = FileChannel.open(path, StandardOpenOption.WRITE)) {
-                    ByteBuffer byteBuffer = ByteBuffer.wrap(payload);
-                    channel.write(byteBuffer, fileOffset);
-                } catch (IOException e) {
-                    throw new RuntimeException(e);
-                }
-
-                fileMetadata = Optional.of(FileMetadata.builder().fileName(fileName).etag(E_TAG).size(length)
-                        .metaKey(verisonKey).offset(Arrays.asList(fileOffset)).len(Arrays.asList(len)).lun(lun).build());
-            }
-
-            db.put(fileMetaKey.getBytes(StandardCharsets.UTF_8), objectMapper.writeValueAsBytes(fileMetadata.get()));
-
-            return fileOffset;
-        } catch (JsonProcessingException | RocksDBException e) {
-            logger.error("write file data into disk fails...");
-            throw new RuntimeException(e);
-        } catch (IOException e) {
-            throw new RuntimeException(e);
-        }
-    }
-
-    public long saveFileData(String fileName, String verisonKey, Path sourcePath, long startWriteOffset, long count, boolean isCreated) {
+    public long saveFileMetaData(String fileName, String verisonKey, byte[] dataToWrite, long count, boolean isCreated) {
         ObjectMapper objectMapper = new ObjectMapper();
 
         String lun = DATA_LUN;
         Path destinationPath = SAVE_TO_DATA_PATH;
 
-        if (!destinationPath.toFile().exists() || !sourcePath.toFile().exists()) {
-            System.out.println("ERROR: device does not exist!");
-            System.exit(-1);
-        }
-
         // 写入File数据
         String fileMetaKey = MetaKeyUtils.getFileMetaKey(fileName);
         long fileOffset = 0;
@@ -337,42 +338,50 @@ public class MyRocksDB
 //                        .metaKey(verisonKey).offset(new ArrayList<>()).len(new ArrayList<>()).lun(lun).build();
 
                 long len = count /BLOCK_SIZE*BLOCK_SIZE+BLOCK_SIZE;
-                fileOffset = manager.allocate(len).get();
+                fileOffset = offsetAllocator.getAndAdd(len);
 
-                try (FileChannel sourceChannel = FileChannel.open(sourcePath, StandardOpenOption.READ);
-                     FileChannel destinationChannel = FileChannel.open(destinationPath, StandardOpenOption.WRITE,
-                                                                                        StandardOpenOption.CREATE,
-                                                                                        StandardOpenOption.TRUNCATE_EXISTING)) {
-                    long byteTransferred = startWriteOffset;
-                    long fileWrittenBytes= count;
-                    destinationChannel.position(fileOffset);
+                ByteBuffer buffer = ByteBuffer.wrap(dataToWrite);
+                // 使用 try-with-resources 确保 channel 会被自动关闭
+                try (FileChannel destinationChannel = FileChannel.open(destinationPath,
+                        StandardOpenOption.WRITE,
+                        StandardOpenOption.CREATE,
+                        StandardOpenOption.TRUNCATE_EXISTING)) {
 
-                    while (fileWrittenBytes > 0) {
-                        byteTransferred = sourceChannel.transferTo(byteTransferred, fileWrittenBytes, destinationChannel);
-                        fileWrittenBytes -= byteTransferred;
-                    }
+                    System.out.println("offset: " + fileOffset);
+                    System.out.println("data: \"" + dataToWrite.length + "\"");
+                    System.out.println("bytes count: " + buffer.remaining());
+
+                    // 4. ***核心操作***: 使用带 position 参数的 write 方法
+                    int bytesWritten = destinationChannel.write(buffer, fileOffset);
+
+                    System.out.println("actual bytes to be written: " + bytesWritten);
                 } catch (IOException e) {
-                    throw new RuntimeException(e);
+                    e.printStackTrace();
                 }
+
                 fileMetadata.get().getOffset().add(fileOffset);
                 fileMetadata.get().getLen().add(len);
                 fileMetadata.get().setSize(fileMetadata.get().getSize() + count);
             } else {
                 long len = count /BLOCK_SIZE*BLOCK_SIZE+BLOCK_SIZE;
-                fileOffset = manager.allocate(len).get();
+                fileOffset = offsetAllocator.getAndAdd(len);
 
-                try (FileChannel sourceChannel = FileChannel.open(sourcePath, StandardOpenOption.READ);
-                     FileChannel destinationChannel = FileChannel.open(destinationPath, StandardOpenOption.WRITE,
-                             StandardOpenOption.CREATE,
-                             StandardOpenOption.TRUNCATE_EXISTING)) {
-                    long byteTransferred = startWriteOffset;
-                    long fileWrittenBytes= count;
-                    destinationChannel.position(fileOffset);
+                ByteBuffer buffer = ByteBuffer.wrap(dataToWrite);
+                // 使用 try-with-resources 确保 channel 会被自动关闭
+                try (FileChannel destinationChannel = FileChannel.open(destinationPath,
+                        StandardOpenOption.WRITE,
+                        StandardOpenOption.CREATE,
+                        StandardOpenOption.TRUNCATE_EXISTING)) {
 
-                    while (fileWrittenBytes > 0) {
-                        byteTransferred = sourceChannel.transferTo(byteTransferred, fileWrittenBytes, destinationChannel);
-                        fileWrittenBytes -= byteTransferred;
-                    }
+                    System.out.println("offset: " + fileOffset);
+                    System.out.println("data: \"" + dataToWrite.length + "\"");
+                    System.out.println("bytes count: " + buffer.remaining());
+
+                    // 4. ***核心操作***: 使用带 position 参数的 write 方法
+                    int bytesWritten = destinationChannel.write(buffer, fileOffset);
+
+                    System.out.println("actual bytes to be written: " + bytesWritten);
+
                 } catch (IOException e) {
                     throw new RuntimeException(e);
                 }
@@ -464,7 +473,7 @@ public class MyRocksDB
         return Optional.empty();
     }
 
-    public void saveMetaData(String targetVnodeId, String bucket, String object, String fileName, long contentLength, String contentType, boolean isCreated) throws JsonProcessingException {
+    public void saveIndexMetaData(String targetVnodeId, String bucket, String object, String fileName, long contentLength, String contentType, boolean isCreated) throws JsonProcessingException {
         long maxOffset = 0;
         ObjectMapper objectMapper = new ObjectMapper();
 

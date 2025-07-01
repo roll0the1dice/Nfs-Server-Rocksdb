@@ -3,6 +3,8 @@ package com.mycompany.rocksdb.netserver;
 import com.mycompany.rocksdb.POJO.FileMetadata;
 import com.mycompany.rocksdb.POJO.VersionIndexMetadata;
 import com.mycompany.rocksdb.RPC.RpcHeader;
+import com.mycompany.rocksdb.SimpleRSocketClient;
+import com.mycompany.rocksdb.SocketReqMsg;
 import com.mycompany.rocksdb.enums.Nfs3Constant;
 import com.mycompany.rocksdb.enums.Nfs3Procedure;
 import com.mycompany.rocksdb.enums.NfsStat3;
@@ -20,6 +22,7 @@ import io.vertx.core.net.NetServer;
 import io.vertx.core.net.NetServerOptions;
 import io.vertx.core.net.NetSocket;
 import io.vertx.core.parsetools.RecordParser;
+import lombok.Getter;
 import org.apache.commons.codec.DecoderException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -84,12 +87,21 @@ public class Nfsv3Server extends AbstractVerticle {
 
     private static final String STATIC_FILES_ROOT = "public";
     private static final String S3HOST = "172.20.123.124";
+    private static final int RSOCKET_PORT = 7000;
+    private static final String CONJUGATE_RSOCKET_PORT = "172.20.123.123";
 
-    private final MyRocksDB myRocksDB = new MyRocksDB();
+
+    private static final MyRocksDB myRocksDB = new MyRocksDB();
     private static final String INDEX_LUN = "fs-SP0-8-index";
     private static final String DATA_LUN = "fs-SP0-2";
     private static final Path SAVE_DATA_PATH = Paths.get("/dev/sde2");
     public static final String BUCK_NAME = "12321";
+
+    //private static final SimpleRSocketClient simpleRSocketClient = new SimpleRSocketClient(CONJUGATE_RSOCKET_PORT, RSOCKET_PORT);
+
+    public static MyRocksDB getMyRocksDB() {
+        return myRocksDB;
+    }
 
     private void init() throws DecoderException, URISyntaxException {
         // Current time in seconds and nanoseconds
@@ -131,7 +143,7 @@ public class Nfsv3Server extends AbstractVerticle {
         }
 
 
-        myRocksDB.init();
+        //myRocksDB.init();
     }
     @Override
     public void start(Future<Void> startFuture) throws Exception {
@@ -995,8 +1007,7 @@ public class Nfsv3Server extends AbstractVerticle {
     }
 
     private List<byte[]> readSegment(List<Long> offsets, List<Long> lens, long size) throws IOException {
-        Path path = SAVE_DATA_PATH;
-        if (!path.toFile().exists()) {
+        if (!SAVE_DATA_PATH.toFile().exists()) {
             log.error("No such path exists...");
             throw new IOException("No such path exists...");
         }
@@ -1008,7 +1019,7 @@ public class Nfsv3Server extends AbstractVerticle {
             long len = lens.get(i);
             int length = (int)Math.min(len, size);
 
-            try(FileChannel fileChannel = FileChannel.open(path, StandardOpenOption.READ)) {
+            try(FileChannel fileChannel = FileChannel.open(SAVE_DATA_PATH, StandardOpenOption.READ)) {
                 ByteBuffer buffer = ByteBuffer.allocate(length);
                 fileChannel.read(buffer, offset);
                 buffer.flip();
@@ -1240,7 +1251,7 @@ public class Nfsv3Server extends AbstractVerticle {
             String targetVnodeId = MetaKeyUtils.getTargetVnodeId(bucket);
             String object = name;
             String filename = MetaKeyUtils.getObjFileName(bucket, object, requestId);
-            myRocksDB.saveMetaData(targetVnodeId, bucket, object, filename, 0, "text/plain", true);
+            myRocksDB.saveIndexMetaData(targetVnodeId, bucket, object, filename, 0, "text/plain", true);
 
 
             String vnodeId = MetaKeyUtils.getObjectVnodeId(bucket, object);
@@ -1311,7 +1322,7 @@ public class Nfsv3Server extends AbstractVerticle {
         return fullResponseBuffer.array();
     }
 
-    private static synchronized long readyToCombineBuffer(ConcurrentSkipListMap<Long, Long> currentData) {
+    private static synchronized long readyToCommitBuffer(ConcurrentSkipListMap<Long, Long> currentData) {
         long expectedOffset = -1, count = 0;
         for (Map.Entry<Long, Long> entry : currentData.entrySet()) {
             if (expectedOffset == -1) {
@@ -1618,7 +1629,7 @@ public class Nfsv3Server extends AbstractVerticle {
 
         COMMIT3res commit3res = null;
 
-        long count = readyToCombineBuffer(currentData);
+        long count = readyToCommitBuffer(currentData);
         if (count > 0) {
             String bucket = BUCK_NAME;
             String targetVnodeId = MetaKeyUtils.getTargetVnodeId(bucket);
@@ -1626,14 +1637,35 @@ public class Nfsv3Server extends AbstractVerticle {
             String versionId = "null";
             String versionKey = MetaKeyUtils.getVersionMetaDataKey(targetVnodeId, bucket, object, versionId);
             Path sourcePath = Paths.get("/mgt/" + filename);
-            //long dataOfLength = sourcePath.toFile().length();
-            myRocksDB.saveMetaData(targetVnodeId, bucket, object, filename, count, "text/plain", false);
             long startWriteOffset = currentData.firstKey();
-            long fileOffset = myRocksDB.saveFileData(filename, versionKey, sourcePath, startWriteOffset, count, false);
-            sourcePath.toFile().deleteOnExit();
-            fileHandleToOffset.remove(keyWrapper);
-            log.info("startWriteOffset: {}, count: {}", startWriteOffset, count);
+            //long dataOfLength = sourcePath.toFile().length();
 
+            SocketReqMsg msg = new SocketReqMsg("", 0)
+                    .put("bucket", bucket)
+                    .put("object", object)
+                    .put("filename", filename)
+                    .put("versionKey", versionKey)
+                    .put("targetVnodeId", targetVnodeId)
+                    .put("startWriteOffset", String.valueOf(startWriteOffset))
+                    .put("count", String.valueOf(count))
+                    .put("contentLength", String.valueOf(count))
+                    .put("contentType", "text/plain");
+
+            //myRocksDB.saveIndexMetaData(targetVnodeId, bucket, object, filename, count, "text/plain", false);
+            // 发送元数据
+            //simpleRSocketClient.putMetadata(msg).block();
+            // 发送文件数据
+            //simpleRSocketClient.uploadLargeFile(sourcePath.toFile().getPath(), msg).block();
+
+            try {
+                Files.deleteIfExists(sourcePath);
+                fileHandleToOffset.remove(keyWrapper);
+            } catch (IOException e) {
+                log.error("Failed to cleanup test files", e);
+            }
+            //long fileOffset = myRocksDB.saveFileMetaData(filename, versionKey, sourcePath, startWriteOffset, count, false);
+            //sourcePath.toFile().delete();
+            log.info("startWriteOffset: {}, count: {}", startWriteOffset, count);
             FAttr3 attritbutes = fileHandleToFAttr3.computeIfPresent(keyWrapper, (key, value) -> {
                 synchronized (value) {
                     long used = count / BLOCK_SIZE * BLOCK_SIZE + BLOCK_SIZE;
