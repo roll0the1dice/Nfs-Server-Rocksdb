@@ -13,8 +13,9 @@
     <maven.compiler.source>8</maven.compiler.source>
     <maven.compiler.target>8</maven.compiler.target>
     <vertx.version>3.7.1</vertx.version>
-    <reactor.version>3.2.9.RELEASE</reactor.version>
+    <reactor.version>3.3.0.RELEASE</reactor.version>
     <jackson.version>2.13.0</jackson.version>
+    <lombok.version>1.18.32</lombok.version>
   </properties>
 
   <dependencyManagement>
@@ -35,6 +36,19 @@
       <groupId>org.rocksdb</groupId>
       <artifactId>rocksdbjni</artifactId>
       <version>6.8.1</version> <!-- 你可以检查并使用最新的稳定版本 -->
+    </dependency>
+
+    <dependency>
+      <groupId>io.rsocket</groupId>
+      <artifactId>rsocket-core</artifactId>
+      <version>1.0.0-RC5</version>
+    </dependency>
+
+    <!-- RSocket Transport Netty -->
+    <dependency>
+      <groupId>io.rsocket</groupId>
+      <artifactId>rsocket-transport-netty</artifactId>
+      <version>1.0.0-RC5</version>
     </dependency>
 
     <dependency>
@@ -85,6 +99,13 @@
       <groupId>com.fasterxml.jackson.dataformat</groupId>
       <artifactId>jackson-dataformat-xml</artifactId>
       <version>2.15.2</version>
+    </dependency>
+
+    <!-- This is the runtime library you already have -->
+    <dependency>
+      <groupId>com.dslplatform</groupId>
+      <artifactId>dsl-json-java8</artifactId>
+      <version>1.9.8</version>
     </dependency>
 
     <dependency>
@@ -150,6 +171,41 @@
           </execution>
         </executions>
       </plugin>
+
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.8.1</version>
+        <configuration>
+          <source>1.8</source>
+          <target>1.8</target>
+          <annotationProcessorPaths>
+            <!-- THIS IS THE CRUCIAL PART FOR THE PROCESSOR -->
+            <path>
+              <groupId>com.dslplatform</groupId>
+              <artifactId>dsl-json-processor</artifactId>
+              <version>1.9.8</version>
+            </path>
+          </annotationProcessorPaths>
+        </configuration>
+      </plugin>
+
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.8.1</version> <!-- 或更高版本 -->
+        <configuration>
+          <!-- 显式声明 Lombok 作为注解处理器 -->
+          <annotationProcessorPaths>
+            <path>
+              <groupId>org.projectlombok</groupId>
+              <artifactId>lombok</artifactId>
+              <version>${lombok.version}</version>
+            </path>
+          </annotationProcessorPaths>
+        </configuration>
+      </plugin>
+
     </plugins>
   </build>
 </project>
