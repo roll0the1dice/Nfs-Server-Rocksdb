@@ -64,7 +64,7 @@ public class SimpleRSocketServer extends AbstractRSocket {
         SUCCESS,              // 成功响应
         ERROR,                // 错误响应
         CONTINUE,              // 继续响应
-        PUT_METADATA,          // 存META数据
+        PUT_INDEX_META_DATA,          // 存META数据
         PUT_REDIS_DATA         // 存redis里的数据
     }
 
@@ -88,7 +88,7 @@ public class SimpleRSocketServer extends AbstractRSocket {
                     return handleDeleteObject(payload);
                 case GET_OBJECT:
                     return handleGetObject(payload);
-                case PUT_METADATA:
+                case PUT_INDEX_META_DATA:
                     return handlePutMetadata(payload);
                 case PUT_REDIS_DATA:
                     return handlePutRedisdata(payload);
@@ -108,7 +108,7 @@ public class SimpleRSocketServer extends AbstractRSocket {
     public Flux<Payload> requestChannel(Publisher<Payload> payloads) {
         UnicastProcessor<Payload> requestFlux = UnicastProcessor.create(Queues.<Payload>unboundedMultiproducer().get());
         UnicastProcessor<Payload> responseFlux = UnicastProcessor.create(Queues.<Payload>unboundedMultiproducer().get());
-        AioUploadServerHandler uploadServerHandler = new AioUploadServerHandler(responseFlux);
+        RequestChannalHandler requestChannalHandler = new RequestChannalHandler(responseFlux);
 
         Flux.from(payloads).subscribe(payload -> {
             try {
@@ -117,30 +117,30 @@ public class SimpleRSocketServer extends AbstractRSocket {
 
 
                 switch (type) {
-                    case PUT_AND_COMPLETE_PUT_OBJECT:
-                        handleSmallFileInStream(payload, requestFlux, responseFlux);
-                        break;
+//                    case PUT_AND_COMPLETE_PUT_OBJECT:
+//                        handleSmallFileInStream(payload, requestFlux, responseFlux);
+//                        break;
                     case START_PUT_OBJECT:
-                        uploadServerHandler.handleStartUpload(payload);
+                        requestChannalHandler.handleStartUpload(payload);
                         break;
                     case PUT_OBJECT:
                         //handleDataBlock(payload, requestFlux, responseFlux);
-                        uploadServerHandler.handleDataBlock(payload);
+                        requestChannalHandler.handleDataBlock(payload);
                         break;
                     case COMPLETE_PUT_OBJECT:
                         //handleCompleteUpload(payload, requestFlux, responseFlux);
-                        uploadServerHandler.handleCompleteUpload(payload);
+                        requestChannalHandler.handleCompleteUpload(payload);
                         break;
-                    case START_GET_OBJECT:
-                        //handleStartDownload(payload, requestFlux, responseFlux);
-                        uploadServerHandler.handleStartDownload(payload);
-                        break;
-                    case GET_OBJECT_CHUNK:
-                        uploadServerHandler.handleDownloadChunk(payload);
-                        break;
-                    case COMPLETE_GET_OBJECT:
-                        uploadServerHandler.handleCompleteDownload(payload);
-                        break;
+//                    case START_GET_OBJECT:
+//                        //handleStartDownload(payload, requestFlux, responseFlux);
+//                        requestChannalHandler.handleStartDownload(payload);
+//                        break;
+//                    case GET_OBJECT_CHUNK:
+//                        requestChannalHandler.handleDownloadChunk(payload);
+//                        break;
+//                    case COMPLETE_GET_OBJECT:
+//                        requestChannalHandler.handleCompleteDownload(payload);
+//                        break;
                     default:
                         responseFlux.onNext(DefaultPayload.create("Unsupported operation", PayloadMetaType.ERROR.name()));
                         responseFlux.onComplete();
@@ -328,7 +328,8 @@ public class SimpleRSocketServer extends AbstractRSocket {
             String object = socketReqMsg.get("object");
             String objectVnodeId = MetaKeyUtils.getObjectVnodeId(bucket, object);
             List<Long> link = Arrays.asList(((long) Long.parseLong(objectVnodeId)));
-            String s_uuid = "0001";
+            //String s_uuid = "0001";
+            String s_uuid = socketReqMsg.get("s_uuid");
 
             Nfsv3Server.getMyRocksDB().saveRedis(objectVnodeId, link, s_uuid);
             log.info("Redis data stored: {}", metadata);

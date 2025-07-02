@@ -94,7 +94,7 @@ public class SimpleRSocketClient {
      */
     public Mono<String> putMetadata(String metadata) {
         return rsocket.requestResponse(
-                DefaultPayload.create(metadata.getBytes(), SimpleRSocketServer.PayloadMetaType.PUT_METADATA.name().getBytes())
+                DefaultPayload.create(metadata.getBytes(), SimpleRSocketServer.PayloadMetaType.PUT_INDEX_META_DATA.name().getBytes())
         ).map(payload -> payload.getDataUtf8());
     }
 
@@ -110,7 +110,7 @@ public class SimpleRSocketClient {
             throw new RuntimeException(e);
         }
         return rsocket.requestResponse(
-                DefaultPayload.create(metadata, SimpleRSocketServer.PayloadMetaType.PUT_METADATA.name().getBytes())
+                DefaultPayload.create(metadata, SimpleRSocketServer.PayloadMetaType.PUT_INDEX_META_DATA.name().getBytes())
         ).map(payload -> payload.getDataUtf8());
     }
 
@@ -142,7 +142,7 @@ public class SimpleRSocketClient {
             SocketReqMsg msg = new SocketReqMsg("", 0)
                     .put("filename", filename);
             byte[] metadataBytes = objectMapper.writeValueAsBytes(msg);
-            int chunkSize = 64 * 1024; // 64KB
+            int chunkSize = 1 * 1024 * 1024; // 64KB
 
             InputStream inputStream = Files.newInputStream(path);
             BufferedInputStream bis = new BufferedInputStream(inputStream);
@@ -201,7 +201,7 @@ public class SimpleRSocketClient {
             Path path = Paths.get(filePath);
             ObjectMapper objectMapper = new ObjectMapper();
             byte[] metadataBytes = objectMapper.writeValueAsBytes(msg);
-            int chunkSize = 64 * 1024; // 64KB
+            int chunkSize = 10 * 1024 * 64; // 64KB
 
             InputStream inputStream = Files.newInputStream(path);
             BufferedInputStream bis = new BufferedInputStream(inputStream);
@@ -540,19 +540,6 @@ public class SimpleRSocketClient {
         // 默认连接参数
         String host = "172.20.123.123";
         int port = 7000;
-
-        // 解析命令行参数
-        if (args.length >= 1) {
-            host = args[0];
-        }
-        if (args.length >= 2) {
-            try {
-                port = Integer.parseInt(args[1]);
-            } catch (NumberFormatException e) {
-                log.error("Invalid port number: {}", args[1]);
-                System.exit(1);
-            }
-        }
 
         log.info("Starting RSocket client, connecting to {}:{}", host, port);
 
