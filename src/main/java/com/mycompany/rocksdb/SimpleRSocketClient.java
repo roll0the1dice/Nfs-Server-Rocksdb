@@ -94,7 +94,7 @@ public class SimpleRSocketClient {
      */
     public Mono<String> putMetadata(String metadata) {
         return rsocket.requestResponse(
-                DefaultPayload.create(metadata.getBytes(), SimpleRSocketServer.PayloadMetaType.PUT_METADATA.name().getBytes())
+                DefaultPayload.create(metadata.getBytes(), SimpleRSocketServer.PayloadMetaType.PUT_INDEX_META_DATA.name().getBytes())
         ).map(payload -> payload.getDataUtf8());
     }
 
@@ -110,7 +110,7 @@ public class SimpleRSocketClient {
             throw new RuntimeException(e);
         }
         return rsocket.requestResponse(
-                DefaultPayload.create(metadata, SimpleRSocketServer.PayloadMetaType.PUT_METADATA.name().getBytes())
+                DefaultPayload.create(metadata, SimpleRSocketServer.PayloadMetaType.PUT_INDEX_META_DATA.name().getBytes())
         ).map(payload -> payload.getDataUtf8());
     }
 
@@ -126,7 +126,7 @@ public class SimpleRSocketClient {
             SocketReqMsg msg = new SocketReqMsg("", 0)
                     .put("filename", filename);
             byte[] metadataBytes = objectMapper.writeValueAsBytes(msg);
-            int chunkSize = 64 * 1024; // 64KB
+            int chunkSize = 10 * 1024 * 64; // 64KB
 
             InputStream inputStream = Files.newInputStream(path);
             BufferedInputStream bis = new BufferedInputStream(inputStream);

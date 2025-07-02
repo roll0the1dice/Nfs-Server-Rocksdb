@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonParseException;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonMappingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.mycompany.rocksdb.DiskChunkStore;
 import com.mycompany.rocksdb.FreeListSpaceManager;
 import com.mycompany.rocksdb.POJO.*;
 import com.mycompany.rocksdb.RocksDBInstanceWrapper;
@@ -398,6 +399,90 @@ public class MyRocksDB
             throw new RuntimeException(e);
         } catch (IOException e) {
             throw new RuntimeException(e);
+        }
+    }
+
+    public long saveFileMetaData(String fileName, String verisonKey, DiskChunkStore diskChunkStore, long count, boolean isCreated) throws IOException {
+        ObjectMapper objectMapper = new ObjectMapper();
+
+        String lun = DATA_LUN;
+        Path destinationPath = SAVE_TO_DATA_PATH;
+
+        // 写入File数据
+        String fileMetaKey = MetaKeyUtils.getFileMetaKey(fileName);
+        long fileOffset = 0;
+        // 写入文件数据
+        try {
+            RocksDBInstanceWrapper rocksDBInstanceWrapper = MyRocksDB.getRocksDB(lun);
+            RocksDB db = rocksDBInstanceWrapper.getRocksDB();
+
+            InputStream dataToWriteInputStream = diskChunkStore.getInputStreamForProcessing();
+            byte[] value = db.get(fileMetaKey.getBytes(StandardCharsets.UTF_8));
+            Optional<FileMetadata> fileMetadata = Optional.empty();
+            if (value != null && !isCreated) {
+                fileMetadata = Optional.of(objectMapper.readValue(value, FileMetadata.class));
+//                FileMetadata fileMetadata = FileMetadata.builder().fileName(fileName).etag(E_TAG).size(0)
+//                        .metaKey(verisonKey).offset(new ArrayList<>()).len(new ArrayList<>()).lun(lun).build();
+
+                long len = count /BLOCK_SIZE*BLOCK_SIZE+BLOCK_SIZE;
+                fileOffset = offsetAllocator.getAndAdd(len);
+
+                // 使用 try-with-resources 确保 channel 会被自动关闭
+                try (FileChannel destinationChannel = FileChannel.open(destinationPath,
+                        StandardOpenOption.WRITE,
+                        StandardOpenOption.CREATE,
+                        StandardOpenOption.TRUNCATE_EXISTING)) {
+
+                    byte[] bufferArray = new byte[128*1024];
+                    int bytesRead;
+                    while((bytesRead = dataToWriteInputStream.read(bufferArray)) != -1) {
+                        // 4. ***核心操作***: 使用带 position 参数的 write 方法
+                        ByteBuffer buffer = ByteBuffer.wrap(bufferArray, 0, bytesRead);
+                        int bytesWritten = destinationChannel.write(buffer, fileOffset);
+                        fileOffset += bytesWritten;
+                    }
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+
+                fileMetadata.get().getOffset().add(fileOffset);
+                fileMetadata.get().getLen().add(len);
+                fileMetadata.get().setSize(fileMetadata.get().getSize() + count);
+            } else {
+                long len = count /BLOCK_SIZE*BLOCK_SIZE+BLOCK_SIZE;
+                fileOffset = offsetAllocator.getAndAdd(len);
+
+                try (FileChannel destinationChannel = FileChannel.open(destinationPath,
+                        StandardOpenOption.WRITE,
+                        StandardOpenOption.CREATE,
+                        StandardOpenOption.TRUNCATE_EXISTING)) {
+
+                    byte[] bufferArray = new byte[128*1024];
+                    int bytesRead;
+                    while((bytesRead = dataToWriteInputStream.read(bufferArray)) != -1) {
+                        // 4. ***核心操作***: 使用带 position 参数的 write 方法
+                        ByteBuffer buffer = ByteBuffer.wrap(bufferArray, 0, bytesRead);
+                        int bytesWritten = destinationChannel.write(buffer, fileOffset);
+                        fileOffset += bytesWritten;
+                    }
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+
+                fileMetadata = Optional.of(FileMetadata.builder().fileName(fileName).etag(E_TAG).size(count)
+                        .metaKey(verisonKey).offset(Arrays.asList(fileOffset)).len(Arrays.asList(len)).lun(lun).build());
+            }
+
+            db.put(fileMetaKey.getBytes(StandardCharsets.UTF_8), objectMapper.writeValueAsBytes(fileMetadata.get()));
+
+            return fileOffset;
+        } catch (JsonProcessingException | RocksDBException e) {
+            logger.error("write file data into disk fails...");
+            throw new RuntimeException(e);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        } finally {
+            diskChunkStore.close();
         }
     }
 
