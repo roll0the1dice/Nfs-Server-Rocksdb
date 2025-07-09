@@ -37,6 +37,34 @@
           </execution>
         </executions>
       </plugin>
+      <plugin>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.8.1</version>
+        <configuration>
+          <source>1.8</source>
+          <target>1.8</target>
+          <annotationProcessorPaths>
+            <path>
+              <groupId>com.dslplatform</groupId>
+              <artifactId>dsl-json-processor</artifactId>
+              <version>1.9.8</version>
+            </path>
+          </annotationProcessorPaths>
+        </configuration>
+      </plugin>
+      <plugin>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.8.1</version>
+        <configuration>
+          <annotationProcessorPaths>
+            <path>
+              <groupId>org.projectlombok</groupId>
+              <artifactId>lombok</artifactId>
+              <version>${lombok.version}</version>
+            </path>
+          </annotationProcessorPaths>
+        </configuration>
+      </plugin>
     </plugins>
   </build>
   <dependencies>
@@ -67,8 +95,9 @@
   <properties>
     <vertx.version>3.7.1</vertx.version>
     <jackson.version>2.13.0</jackson.version>
-    <reactor.version>3.2.9.RELEASE</reactor.version>
+    <reactor.version>3.3.0.RELEASE</reactor.version>
     <maven.compiler.source>8</maven.compiler.source>
+    <lombok.version>1.18.32</lombok.version>
     <maven.compiler.target>8</maven.compiler.target>
   </properties>
 </project>

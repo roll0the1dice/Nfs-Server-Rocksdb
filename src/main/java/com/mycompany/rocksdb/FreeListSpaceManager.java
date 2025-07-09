@@ -4,6 +4,7 @@ import lombok.Data;
 
 import java.util.Optional;
 import java.util.TreeSet;
+import java.util.concurrent.atomic.AtomicLong;
 
 @Data
 public class FreeListSpaceManager {
@@ -21,6 +22,12 @@ public class FreeListSpaceManager {
         this.highWaterMark = initialStartOffset;
     }
 
+
+//    AtomicLong off = new AtomicLong(0L);
+//    public Optional<Long> allocate(long length) {
+//        return off.getAndAdd(length);
+//    }
+//
     /**
      * 分配一个指定长度的逻辑空间。
      * @param length 需要分配的长度

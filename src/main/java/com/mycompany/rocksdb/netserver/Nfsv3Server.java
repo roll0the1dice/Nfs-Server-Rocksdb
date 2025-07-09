@@ -1,8 +1,13 @@
 package com.mycompany.rocksdb.netserver;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.mycompany.rocksdb.POJO.ChunkFile;
+import com.mycompany.rocksdb.POJO.Inode;
 import com.mycompany.rocksdb.POJO.FileMetadata;
 import com.mycompany.rocksdb.POJO.VersionIndexMetadata;
 import com.mycompany.rocksdb.RPC.RpcHeader;
+import com.mycompany.rocksdb.SimpleRSocketClient;
+import com.mycompany.rocksdb.SocketReqMsg;
 import com.mycompany.rocksdb.enums.Nfs3Constant;
 import com.mycompany.rocksdb.enums.Nfs3Procedure;
 import com.mycompany.rocksdb.enums.NfsStat3;
@@ -20,6 +25,7 @@ import io.vertx.core.net.NetServer;
 import io.vertx.core.net.NetServerOptions;
 import io.vertx.core.net.NetSocket;
 import io.vertx.core.parsetools.RecordParser;
+import lombok.Getter;
 import org.apache.commons.codec.DecoderException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -42,6 +48,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static com.mycompany.rocksdb.constant.GlobalConstant.BLOCK_SIZE;
+import static com.mycompany.rocksdb.utils.MetaKeyUtils.getRequestId;
 
 
 public class Nfsv3Server extends AbstractVerticle {
@@ -79,17 +86,27 @@ public class Nfsv3Server extends AbstractVerticle {
     private static final Map<ByteArrayKeyWrapper, List<ByteArrayKeyWrapper>> fileHandleToChildrenFileHandle = new ConcurrentHashMap<>();
     private static final Map<ByteArrayKeyWrapper, String> fileHandleToRequestId = new ConcurrentHashMap<>();
     private static final Map<ByteArrayKeyWrapper, ConcurrentSkipListMap<Long, Long>> fileHandleToOffset= new ConcurrentHashMap<>();
+    private static final Map<ByteArrayKeyWrapper, Inode> fileHandleToINode = new ConcurrentHashMap<>();
 
     private static final Map<ByteArrayKeyWrapper, AtomicLong> fileHandleNextAppendingPosition = new ConcurrentHashMap<>();
 
     private static final String STATIC_FILES_ROOT = "public";
     private static final String S3HOST = "172.20.123.124";
+    private static final int RSOCKET_PORT = 7000;
+    private static final String CONJUGATE_RSOCKET_PORT = "172.20.123.123";
 
-    private final MyRocksDB myRocksDB = new MyRocksDB();
+
+    private static final MyRocksDB myRocksDB = new MyRocksDB();
     private static final String INDEX_LUN = "fs-SP0-8-index";
     private static final String DATA_LUN = "fs-SP0-2";
     private static final Path SAVE_DATA_PATH = Paths.get("/dev/sde2");
-    public static final String BUCK_NAME = "12321";
+    public static final String BUCK_NAME = "123";
+
+    //private static final SimpleRSocketClient simpleRSocketClient = new SimpleRSocketClient(CONJUGATE_RSOCKET_PORT, RSOCKET_PORT);
+
+    public static MyRocksDB getMyRocksDB() {
+        return myRocksDB;
+    }
 
     private void init() throws DecoderException, URISyntaxException {
         // Current time in seconds and nanoseconds
@@ -131,7 +148,7 @@ public class Nfsv3Server extends AbstractVerticle {
         }
 
 
-        myRocksDB.init();
+        //myRocksDB.init();
     }
     @Override
     public void start(Future<Void> startFuture) throws Exception {
@@ -995,8 +1012,7 @@ public class Nfsv3Server extends AbstractVerticle {
     }
 
     private List<byte[]> readSegment(List<Long> offsets, List<Long> lens, long size) throws IOException {
-        Path path = SAVE_DATA_PATH;
-        if (!path.toFile().exists()) {
+        if (!SAVE_DATA_PATH.toFile().exists()) {
             log.error("No such path exists...");
             throw new IOException("No such path exists...");
         }
@@ -1008,7 +1024,7 @@ public class Nfsv3Server extends AbstractVerticle {
             long len = lens.get(i);
             int length = (int)Math.min(len, size);
 
-            try(FileChannel fileChannel = FileChannel.open(path, StandardOpenOption.READ)) {
+            try(FileChannel fileChannel = FileChannel.open(SAVE_DATA_PATH, StandardOpenOption.READ)) {
                 ByteBuffer buffer = ByteBuffer.allocate(length);
                 fileChannel.read(buffer, offset);
                 buffer.flip();
@@ -1023,15 +1039,85 @@ public class Nfsv3Server extends AbstractVerticle {
         return result;
     }
 
+    public static void creatHole(List<Inode.InodeData> list, Inode.InodeData holeFile , Inode inode) throws JsonProcessingException {
+        String holeFileName = MetaKeyUtils.getHoleFileName(inode.getBucket(), getRequestId());
+        Inode.InodeData holeChunk = ChunkFile.newChunk(holeFileName, holeFile, inode);
+        ChunkFile holeChunkFile =  ChunkFile.builder().nodeId(inode.getNodeId()).bucket(inode.getBucket()).objName(inode.getObjName())
+            .versionId(inode.getVersionId()).versionNum(MetaKeyUtils.getVersionNum()).size(holeFile.size).build();
+
+
+        holeChunkFile.getChunkList().add(holeFile);
+
+        myRocksDB.saveChunkFileMetaData(ChunkFile.getChunkKey(holeFileName), holeChunkFile);
+
+        list.add(holeChunk);
+    }
+
+    public static void createData(List<Inode.InodeData> list, Inode.InodeData data, Inode inode, byte[] dataToWrite) throws JsonProcessingException {
+        String chunkKey = ChunkFile.getChunkKey(data.fileName);
+        Inode.InodeData chunk = ChunkFile.newChunk(data.fileName, data, inode);
+        ChunkFile chunkFile = ChunkFile.builder().nodeId(inode.getNodeId()).bucket(inode.getBucket()).objName(inode.getObjName())
+                .versionId(inode.getVersionId()).versionNum(MetaKeyUtils.getVersionNum()).size(data.size).chunkList(new ArrayList<>()).build();
+
+        String vnodeId = data.fetchInodeDataTargetVnodeId();
+        List<Long> link = Arrays.asList(((long) Long.parseLong(vnodeId)));
+        String s_uuid = "0002";
+        myRocksDB.saveRedis(vnodeId, link, s_uuid);
+
+        String targetVnodeId = MetaKeyUtils.getTargetVnodeId(inode.getBucket());
+        String verisonKey = MetaKeyUtils.getVersionMetaDataKey(targetVnodeId, inode.getBucket(), inode.getObjName(), inode.getVersionId());
+        myRocksDB.saveFileMetaData(data.getFileName(), verisonKey, dataToWrite, dataToWrite.length,true);
+
+        chunkFile.getChunkList().add(data);
+        list.add(chunk);
+
+        long totalSize = 0;
+        for (Inode.InodeData d : inode.getInodeData()) {
+            totalSize += d.getSize();
+        }
+        inode.setSize(totalSize);
+
+        totalSize = 0;
+        for (Inode.InodeData d : chunkFile.getChunkList()) {
+            totalSize += d.getSize();
+        }
+        chunkFile.setSize(totalSize);
+
+        myRocksDB.saveINodeMetaData(targetVnodeId, inode);
+        myRocksDB.saveChunkFileMetaData(chunkKey, chunkFile);
+    }
+
+    public static void appendData(List<Inode.InodeData> list, Inode.InodeData data, Inode inode, byte[] dataToWrite) throws JsonProcessingException {
+        if (list.isEmpty()) {
+            createData(list, data, inode, dataToWrite);
+        }
+        else {
+            Inode.InodeData last = list.get(list.size() - 1);
+            String chunkKey = ChunkFile.getChunkKeyFromChunkFileName(inode.getBucket(), last.fileName);
+            ChunkFile chunkFile = myRocksDB.getChunkFileMetaData(chunkKey).orElseThrow(() -> new RuntimeException("chunk file not found..."));
+            chunkFile.getChunkList().add(data);
+            myRocksDB.saveChunkFileMetaData(chunkKey, chunkFile);
+
+            String vnodeId = data.fetchInodeDataTargetVnodeId();
+            List<Long> link = Arrays.asList(((long) Long.parseLong(vnodeId)));
+            String s_uuid = "0002";
+            myRocksDB.saveRedis(vnodeId, link, s_uuid);
+
+            String targetVnodeId = MetaKeyUtils.getTargetVnodeId(inode.getBucket());
+            String verisonKey = MetaKeyUtils.getVersionMetaDataKey(targetVnodeId, inode.getBucket(), inode.getObjName(), null);
+            myRocksDB.saveFileMetaData(data.getFileName(), verisonKey, dataToWrite, dataToWrite.length, true);
+        }
+    }
+
     private byte[] createNfsWriteReply(int xid, Buffer request, int startOffset) throws IOException, URISyntaxException {
         // Parse file handle, offset, and data from request
         int fhandleLength = request.getInt(startOffset);
         byte[] fhandle = request.slice(startOffset + 4, startOffset + 4 + fhandleLength).getBytes();
-        long offset = request.getLong(startOffset + 4 + fhandleLength);
+        long reqOffset = request.getLong(startOffset + 4 + fhandleLength);
         int count = request.getInt(startOffset + 4 + fhandleLength + 8);
         int stable = request.getInt(startOffset + 4 + fhandleLength + 8 + 4);
         int dataOfLength = request.getInt(startOffset + 4 + fhandleLength + 8);
-        byte[] data = request.slice(startOffset + 4 + fhandleLength + 8 + 12,
+        byte[] dataToWrite = request.slice(startOffset + 4 + fhandleLength + 8 + 12,
                 startOffset + 4 + fhandleLength + 8 + 12 + dataOfLength).getBytes();
 
         //log.info("NFS Write Reply: {}", new String(data, StandardCharsets.UTF_8));
@@ -1047,35 +1133,83 @@ public class Nfsv3Server extends AbstractVerticle {
         WRITE3res write3res = null;
         FAttr3 attributes = fileHandleToFAttr3.getOrDefault(byteArrayKeyWrapper, null);
         String object = fileHandleToFileName.get(byteArrayKeyWrapper);
-        String requestId = fileHandleToRequestId.get(byteArrayKeyWrapper);
+        Inode inode = fileHandleToINode.get(byteArrayKeyWrapper);
 
-        if (attributes != null && object != null && requestId != null) {
+        if (attributes != null && object != null) {
 
             fileHandleToOffset.compute(byteArrayKeyWrapper, (key, value) -> {
                if (value == null) {
                    value = new ConcurrentSkipListMap<>();
                }
-               value.put(offset, (long) dataOfLength);
+               value.put(reqOffset, (long) dataOfLength);
                return value;
             });
 
             String bucket = BUCK_NAME;
-            String targetVnodeId = MetaKeyUtils.getTargetVnodeId(bucket);
-            String filename = MetaKeyUtils.getObjFileName(bucket, object, requestId);
-            String versionId = "null";
-            String versionKey = MetaKeyUtils.getVersionMetaDataKey(targetVnodeId, bucket, object, versionId);
+            //String targetVnodeId = MetaKeyUtils.getTargetVnodeId(bucket);
+            String filename = MetaKeyUtils.getObjFileName(bucket, object, getRequestId());
+            //String versionId = "null";
+            //String versionKey = MetaKeyUtils.getVersionMetaDataKey(targetVnodeId, bucket, object, versionId);
+
+            Inode.InodeData inodeData = new Inode.InodeData();
+            inodeData.offset = reqOffset;
+            inodeData.size = dataOfLength;
+            inodeData.fileName = filename;
+
+            List<Inode.InodeData> list = inode.getInodeData();
+            if (reqOffset >= inode.getSize()) {
+                if (reqOffset > inode.getSize()) {
+                    if (list.isEmpty()) {
+                        creatHole(list, Inode.InodeData.newHoleFile(dataOfLength), inode);
+                    } else {
+                        creatHole(list, Inode.InodeData.newHoleFile(reqOffset - inode.getSize()), inode);
+                        createData(list, inodeData, inode, dataToWrite);
+                    }
+                }
+                // 恰好追加
+                else {
+                    appendData(list, inodeData, inode, dataToWrite);
+                }
+            }
+            // 写入位置与当前文件数据块有交集
+            else {
+                Inode.InodeData last = list.get(list.size()-1);
+                String chunkKey = ChunkFile.getChunkKeyFromChunkFileName(inode.getBucket(), last.fileName);
+                ChunkFile chunkFile = myRocksDB.getChunkFileMetaData(chunkKey).orElseThrow(() -> new RuntimeException("chunk file not found..."));
+                Inode.partialOverwrite3(chunkFile, reqOffset, inodeData);
+                myRocksDB.saveChunkFileMetaData(chunkKey, chunkFile);
+
+                String vnodeId = inodeData.fetchInodeDataTargetVnodeId();
+                List<Long> link = Arrays.asList(((long) Long.parseLong(vnodeId)));
+                String s_uuid = "0002";
+                myRocksDB.saveRedis(vnodeId, link, s_uuid);
+
+                String targetVnodeId = MetaKeyUtils.getTargetVnodeId(inode.getBucket());
+                String verisonKey = MetaKeyUtils.getVersionMetaDataKey(targetVnodeId, inode.getBucket(), inode.getObjName(), inode.getVersionId());
+                myRocksDB.saveFileMetaData(inodeData.getFileName(), verisonKey, dataToWrite, dataToWrite.length,true);
+            }
             //myRocksDB.saveMetaData(targetVnodeId, bucket, object, filename, dataOfLength, "text/plain", false);
             //long fileOffset = myRocksDB.saveFileData(filename, versionKey, dataOfLength, data, false);
-            Path path = Paths.get("/mgt/"+filename);
-            if (!path.toFile().exists()) {
-                Files.createFile(path);
-            }
-            try (FileChannel channel = FileChannel.open(path, StandardOpenOption.WRITE)) {
-                ByteBuffer byteBuffer = ByteBuffer.wrap(data);
-                channel.write(byteBuffer, offset);
-            } catch (IOException e) {
-                throw new RuntimeException(e);
-            }
+//            Path path = Paths.get("/mgt/"+filename);
+//            if (!path.toFile().exists()) {
+//                Files.createFile(path);
+//            }
+//            try (FileChannel channel = FileChannel.open(path, StandardOpenOption.WRITE)) {
+//                ByteBuffer byteBuffer = ByteBuffer.wrap(data);
+//                channel.write(byteBuffer, offset);
+//            } catch (IOException e) {
+//                throw new RuntimeException(e);
+//            }
+
+            FAttr3 attritbutes = fileHandleToFAttr3.computeIfPresent(byteArrayKeyWrapper, (key, value) -> {
+                synchronized (value) {
+                    long used = count / BLOCK_SIZE * BLOCK_SIZE + BLOCK_SIZE;
+                    value.setSize(value.getSize() + count);
+                    value.setUsed(used);
+                }
+                return value;
+            });
+
 
             PreOpAttr before = PreOpAttr.builder().attributesFollow(0).build();
             PostOpAttr after = PostOpAttr.builder().attributesFollow(1).attributes(attributes).build();
@@ -1084,7 +1218,7 @@ public class Nfsv3Server extends AbstractVerticle {
             WRITE3resok write3resok = WRITE3resok.builder()
                     .fileWcc(fileWcc)
                     .count(count)
-                    .committed(WRITE3resok.StableHow.UNSTABLE)
+                    .committed(WRITE3resok.StableHow.FILE_SYNC)
                     .verifier(0L)
                     .build();
 
@@ -1231,8 +1365,13 @@ public class Nfsv3Server extends AbstractVerticle {
             boolean add = value.add(new ByteArrayKeyWrapper(fileHandle));
             return value;
         });
-        String requestId = MetaKeyUtils.getRequestId();
-        fileHandleToRequestId.put(new ByteArrayKeyWrapper(fileHandle), requestId);
+        String requestId = getRequestId();
+        //fileHandleToRequestId.put(new ByteArrayKeyWrapper(fileHandle), requestId);
+//        Inode inode = Inode.builder().linkN(1).atime(0).createTime(seconds).ctime(seconds).mode(0)
+//                        .uid(0).gid(0).size(0).objName(name).nodeId(fileId).cookie(fileId+1L).bucket(BUCK_NAME)
+//                        .storage("dataa").majorDev(0x08c60040).minorDev(0x2b5cd8a8).versionId("null").reference(name).versionNum(MetaKeyUtils.getVersionNum()).build();
+
+
 
         // 将元数据持久化存储到RocksDB中
         try {
@@ -1240,8 +1379,10 @@ public class Nfsv3Server extends AbstractVerticle {
             String targetVnodeId = MetaKeyUtils.getTargetVnodeId(bucket);
             String object = name;
             String filename = MetaKeyUtils.getObjFileName(bucket, object, requestId);
-            myRocksDB.saveMetaData(targetVnodeId, bucket, object, filename, 0, "text/plain", true);
+            Inode inode = myRocksDB.saveIndexMetaAndInodeData(targetVnodeId, bucket, object, filename, 0, "text/plain", true).orElseThrow(() -> new RuntimeException("no such inode.."));
 
+            fileHandleToINode.put(new ByteArrayKeyWrapper(fileHandle), inode);
+            //myRocksDB.saveINodeMetaData(targetVnodeId, inode);
 
             String vnodeId = MetaKeyUtils.getObjectVnodeId(bucket, object);
             List<Long> link = Arrays.asList(((long) Long.parseLong(vnodeId)));
@@ -1311,7 +1452,7 @@ public class Nfsv3Server extends AbstractVerticle {
         return fullResponseBuffer.array();
     }
 
-    private static synchronized long readyToCombineBuffer(ConcurrentSkipListMap<Long, Long> currentData) {
+    private static synchronized long readyToCommitBuffer(ConcurrentSkipListMap<Long, Long> currentData) {
         long expectedOffset = -1, count = 0;
         for (Map.Entry<Long, Long> entry : currentData.entrySet()) {
             if (expectedOffset == -1) {
@@ -1613,64 +1754,85 @@ public class Nfsv3Server extends AbstractVerticle {
         });
 
         String object = fileHandleToFileName.get(keyWrapper);
-        String requestId = fileHandleToRequestId.get(keyWrapper);
-        ConcurrentSkipListMap<Long, Long> currentData = fileHandleToOffset.getOrDefault(keyWrapper, new ConcurrentSkipListMap<Long, Long>());
+        //String requestId = fileHandleToRequestId.get(keyWrapper);
+        //ConcurrentSkipListMap<Long, Long> currentData = fileHandleToOffset.getOrDefault(keyWrapper, new ConcurrentSkipListMap<Long, Long>());
 
         COMMIT3res commit3res = null;
 
-        long count = readyToCombineBuffer(currentData);
-        if (count > 0) {
+        //long count = readyToCommitBuffer(currentData);
+        //if (count > 0) {
             String bucket = BUCK_NAME;
             String targetVnodeId = MetaKeyUtils.getTargetVnodeId(bucket);
-            String filename = MetaKeyUtils.getObjFileName(bucket, object, requestId);
+            //String filename = MetaKeyUtils.getObjFileName(bucket, object, requestId);
             String versionId = "null";
             String versionKey = MetaKeyUtils.getVersionMetaDataKey(targetVnodeId, bucket, object, versionId);
-            Path sourcePath = Paths.get("/mgt/" + filename);
+            //Path sourcePath = Paths.get("/mgt/" + filename);
+            //long startWriteOffset = currentData.firstKey();
             //long dataOfLength = sourcePath.toFile().length();
-            myRocksDB.saveMetaData(targetVnodeId, bucket, object, filename, count, "text/plain", false);
-            long startWriteOffset = currentData.firstKey();
-            long fileOffset = myRocksDB.saveFileData(filename, versionKey, sourcePath, startWriteOffset, count, false);
-            sourcePath.toFile().deleteOnExit();
-            fileHandleToOffset.remove(keyWrapper);
-            log.info("startWriteOffset: {}, count: {}", startWriteOffset, count);
 
-            FAttr3 attritbutes = fileHandleToFAttr3.computeIfPresent(keyWrapper, (key, value) -> {
-                synchronized (value) {
-                    long used = count / BLOCK_SIZE * BLOCK_SIZE + BLOCK_SIZE;
-                    value.setSize(value.getSize() + count);
-                    value.setUsed(used);
-                }
-                return value;
-            });
+//            SocketReqMsg msg = new SocketReqMsg("", 0)
+//                    .put("bucket", bucket)
+//                    .put("object", object)
+//                    .put("filename", filename)
+//                    .put("versionKey", versionKey)
+//                    .put("targetVnodeId", targetVnodeId)
+//                    .put("startWriteOffset", String.valueOf(startWriteOffset))
+//                    .put("count", String.valueOf(count))
+//                    .put("contentLength", String.valueOf(count))
+//                    .put("contentType", "text/plain");
+//
+//            //myRocksDB.saveIndexMetaData(targetVnodeId, bucket, object, filename, count, "text/plain", false);
+//            // 发送元数据
+//            simpleRSocketClient.putMetadata(msg).block();
+//            // 发送文件数据
+//            simpleRSocketClient.uploadLargeFile(sourcePath.toFile().getPath(), msg).block();
+//
+//            try {
+//                Files.deleteIfExists(sourcePath);
+//                fileHandleToOffset.remove(keyWrapper);
+//            } catch (IOException e) {
+//                log.error("Failed to cleanup test files", e);
+//            }
+            //long fileOffset = myRocksDB.saveFileMetaData(filename, versionKey, sourcePath, startWriteOffset, count, false);
+            //sourcePath.toFile().delete();
+            //log.info("startWriteOffset: {}, count: {}", startWriteOffset, count);
+//            FAttr3 attritbutes = fileHandleToFAttr3.computeIfPresent(keyWrapper, (key, value) -> {
+//                synchronized (value) {
+//                    long used = count / BLOCK_SIZE * BLOCK_SIZE + BLOCK_SIZE;
+//                    value.setSize(value.getSize() + count);
+//                    value.setUsed(used);
+//                }
+//                return value;
+//            });
 
-            //FAttr3 attritbutes = fileHandleToFAttr3.getOrDefault(keyWrapper, null);
-
-            PreOpAttr befor = PreOpAttr.builder().attributesFollow(0).build();
-            PostOpAttr after = PostOpAttr.builder().attributesFollow(attritbutes != null ? 1 : 0).attributes(attritbutes).build();
-
-            WccData fileWcc = WccData.builder().before(befor).after(after).build();
-            COMMIT3resok commit3resok = COMMIT3resok.builder().fileWcc(fileWcc).verifier(0L).build();
-
-            commit3res = COMMIT3res.createSuccess(commit3resok);
-        }
-        else if (count == -1) {
             FAttr3 attritbutes = fileHandleToFAttr3.getOrDefault(keyWrapper, null);
 
             PreOpAttr befor = PreOpAttr.builder().attributesFollow(0).build();
             PostOpAttr after = PostOpAttr.builder().attributesFollow(attritbutes != null ? 1 : 0).attributes(attritbutes).build();
 
             WccData fileWcc = WccData.builder().before(befor).after(after).build();
-            COMMIT3resfail commit3resfail = COMMIT3resfail.builder().fileWcc(fileWcc).build();
-            commit3res = COMMIT3res.createFailure(NfsStat3.NFS3ERR_JUKEBOX, commit3resfail);
-        } else {
-            PreOpAttr befor = PreOpAttr.builder().attributesFollow(0).build();
-            PostOpAttr after = PostOpAttr.builder().attributesFollow(0).build();
-
-            WccData fileWcc = WccData.builder().before(befor).after(after).build();
             COMMIT3resok commit3resok = COMMIT3resok.builder().fileWcc(fileWcc).verifier(0L).build();
 
             commit3res = COMMIT3res.createSuccess(commit3resok);
-        }
+        //}
+//        else if (count == -1) {
+//            FAttr3 attritbutes = fileHandleToFAttr3.getOrDefault(keyWrapper, null);
+//
+//            PreOpAttr befor = PreOpAttr.builder().attributesFollow(0).build();
+//            PostOpAttr after = PostOpAttr.builder().attributesFollow(attritbutes != null ? 1 : 0).attributes(attritbutes).build();
+//
+//            WccData fileWcc = WccData.builder().before(befor).after(after).build();
+//            COMMIT3resfail commit3resfail = COMMIT3resfail.builder().fileWcc(fileWcc).build();
+//            commit3res = COMMIT3res.createFailure(NfsStat3.NFS3ERR_JUKEBOX, commit3resfail);
+//        } else {
+//            PreOpAttr befor = PreOpAttr.builder().attributesFollow(0).build();
+//            PostOpAttr after = PostOpAttr.builder().attributesFollow(0).build();
+//
+//            WccData fileWcc = WccData.builder().before(befor).after(after).build();
+//            COMMIT3resok commit3resok = COMMIT3resok.builder().fileWcc(fileWcc).verifier(0L).build();
+//
+//            commit3res = COMMIT3res.createSuccess(commit3resok);
+//        }
 
         int rpcNfsLength = commit3res.getSerializedSize();
         ByteBuffer rpcNfsBuffer = ByteBuffer.allocate(rpcNfsLength);
