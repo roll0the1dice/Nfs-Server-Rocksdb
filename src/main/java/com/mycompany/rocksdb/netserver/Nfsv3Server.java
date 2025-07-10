@@ -1119,6 +1119,33 @@ public class Nfsv3Server extends AbstractVerticle {
             String targetVnodeId = MetaKeyUtils.getTargetVnodeId(inode.getBucket());
             String verisonKey = MetaKeyUtils.getVersionMetaDataKey(targetVnodeId, inode.getBucket(), inode.getObjName(), null);
             myRocksDB.saveFileMetaData(data.getFileName(), verisonKey, dataToWrite, dataToWrite.length, true);
+
+            long totalSize = 0;
+            int chunkNum = 0;
+            for (Inode.InodeData d : chunkFile.getChunkList()) {
+                totalSize += d.getSize();
+                if (!inode.getInodeData().contains(d)) {
+                    //Inode.InodeData newchunk = ChunkFile.newChunk(inodeData.fileName, inodeData, inode);
+                    //inode.getInodeData().add(newchunk);
+                    chunkNum++;
+                }
+                //chunkNum++;
+            }
+
+
+//                totalSize = 0;
+//                for (Inode.InodeData d : inode.getInodeData()) {
+//                    totalSize += d.getSize();
+//                    //chunkNum++;
+//                }
+            inode.setSize(totalSize);
+            chunkFile.setSize(totalSize);
+            Inode.InodeData pivot = inode.getInodeData().get(0);
+            pivot.setChunkNum(chunkNum);
+            pivot.setSize(totalSize);
+
+            myRocksDB.saveINodeMetaData(targetVnodeId, inode);
+            myRocksDB.saveChunkFileMetaData(chunkKey, chunkFile);
         }
     }
 
@@ -1170,20 +1197,20 @@ public class Nfsv3Server extends AbstractVerticle {
             inodeData.fileName = filename;
 
             List<Inode.InodeData> list = inode.getInodeData();
-            if (reqOffset >= inode.getSize()) {
-                if (reqOffset > inode.getSize()) {
-                    if (list.isEmpty()) {
-                        creatHole(list, Inode.InodeData.newHoleFile(reqOffset), inode);
-                        createData(list, inodeData, inode, dataToWrite);
-                    } else {
-                        creatHole(list, Inode.InodeData.newHoleFile(reqOffset - inode.getSize()), inode);
-                        createData(list, inodeData, inode, dataToWrite);
-                    }
-                }
-                // 恰好追加
-                else {
+            if (reqOffset == inode.getSize()) {
+//                if (reqOffset > inode.getSize()) {
+//                    if (list.isEmpty()) {
+//                        creatHole(list, Inode.InodeData.newHoleFile(reqOffset), inode);
+//                        createData(list, inodeData, inode, dataToWrite);
+//                    } else {
+//                        creatHole(list, Inode.InodeData.newHoleFile(reqOffset - inode.getSize()), inode);
+//                        createData(list, inodeData, inode, dataToWrite);
+//                    }
+//                }
+//                // 恰好追加
+//                else {
                     appendData(list, inodeData, inode, dataToWrite);
-                }
+//                }
             }
             // 写入位置与当前文件数据块有交集
             else {
@@ -1253,7 +1280,7 @@ public class Nfsv3Server extends AbstractVerticle {
 
 
             PreOpAttr before = PreOpAttr.builder().attributesFollow(0).build();
-            PostOpAttr after = PostOpAttr.builder().attributesFollow(1).attributes(attributes).build();
+            PostOpAttr after = PostOpAttr.builder().attributesFollow(1).attributes(attritbutes).build();
 
             WccData fileWcc = WccData.builder().before(before).after(after).build();
             WRITE3resok write3resok = WRITE3resok.builder()
