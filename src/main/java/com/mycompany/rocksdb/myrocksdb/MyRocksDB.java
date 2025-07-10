@@ -485,6 +485,57 @@ public long saveFileMetaData(String fileName, String verisonKey, byte[] dataToWr
         }
     }
 
+    public void saveRedis123(String vnodeId, List<Long> link, String s_uuid) {
+        String lun = DATA_LUN;
+        // 连接到本地 Redis 6号库
+        RedisURI redisURI = RedisURI.builder().withHost("localhost")
+                .withPort(6379)
+                .withPassword("Gw@uUp8tBedfrWDy".toCharArray())
+                .withDatabase(6)
+                .build();
+        RedisClient redisClient = RedisClient.create(redisURI);
+        StatefulRedisConnection<String, String> connection = redisClient.connect();
+        RedisCommands<String, String> commands = connection.sync();
+        // 写入数据
+        String redisKey = "dataa" + vnodeId;
+
+        commands.hset(redisKey, "v_num", vnodeId);
+        commands.hset(redisKey, "lun_name", lun);
+        commands.hset(redisKey, "link", link.toString());
+        commands.hset(redisKey, "s_uuid", s_uuid);
+        commands.hset(redisKey, "take_over", "0");
+
+        // 关闭连接
+        connection.close();
+        redisClient.shutdown();
+    }
+
+
+    public void saveRedis124(String vnodeId, List<Long> link, String s_uuid) {
+        String lun = DATA_LUN;
+        // 连接到本地 Redis 6号库
+        RedisURI redisURI = RedisURI.builder().withHost("localhost")
+                .withPort(6379)
+                .withPassword("Gw@uUp8tBedfrWDy".toCharArray())
+                .withDatabase(6)
+                .build();
+        RedisClient redisClient = RedisClient.create(redisURI);
+        StatefulRedisConnection<String, String> connection = redisClient.connect();
+        RedisCommands<String, String> commands = connection.sync();
+        // 写入数据
+        String redisKey = "dataa" + vnodeId;
+
+        commands.hset(redisKey, "v_num", vnodeId);
+        commands.hset(redisKey, "lun_name", lun);
+        commands.hset(redisKey, "link", link.toString());
+        commands.hset(redisKey, "s_uuid", s_uuid);
+        commands.hset(redisKey, "take_over", "0");
+
+        // 关闭连接
+        connection.close();
+        redisClient.shutdown();
+    }
+
     public void saveRedis(String vnodeId, List<Long> link, String s_uuid) {
         String lun = DATA_LUN;
         // 连接到本地 Redis 6号库

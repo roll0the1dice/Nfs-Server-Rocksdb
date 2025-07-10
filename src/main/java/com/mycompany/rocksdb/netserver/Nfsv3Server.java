@@ -99,8 +99,8 @@ public class Nfsv3Server extends AbstractVerticle {
     private static final MyRocksDB myRocksDB = new MyRocksDB();
     private static final String INDEX_LUN = "fs-SP0-8-index";
     private static final String DATA_LUN = "fs-SP0-2";
-    private static final Path SAVE_DATA_PATH = Paths.get("/dev/sde2");
-    public static final String BUCK_NAME = "123";
+    private static final Path SAVE_DATA_PATH = Paths.get("/dev/sdg2");
+    public static final String BUCK_NAME = "1212";
 
     //private static final SimpleRSocketClient simpleRSocketClient = new SimpleRSocketClient(CONJUGATE_RSOCKET_PORT, RSOCKET_PORT);
 
@@ -1043,21 +1043,33 @@ public class Nfsv3Server extends AbstractVerticle {
         String holeFileName = MetaKeyUtils.getHoleFileName(inode.getBucket(), getRequestId());
         Inode.InodeData holeChunk = ChunkFile.newChunk(holeFileName, holeFile, inode);
         ChunkFile holeChunkFile =  ChunkFile.builder().nodeId(inode.getNodeId()).bucket(inode.getBucket()).objName(inode.getObjName())
-            .versionId(inode.getVersionId()).versionNum(MetaKeyUtils.getVersionNum()).size(holeFile.size).build();
-
+            .versionId(inode.getVersionId()).versionNum(MetaKeyUtils.getVersionNum()).size(holeFile.size).chunkList(new ArrayList<>()).hasDeleteFiles(new LinkedList<>()).build();
 
         holeChunkFile.getChunkList().add(holeFile);
-
-        myRocksDB.saveChunkFileMetaData(ChunkFile.getChunkKey(holeFileName), holeChunkFile);
-
         list.add(holeChunk);
+
+        long totalSize = 0;
+        for (Inode.InodeData d : inode.getInodeData()) {
+            totalSize += d.getSize();
+        }
+        inode.setSize(totalSize);
+
+        totalSize = 0;
+        for (Inode.InodeData d : holeChunkFile.getChunkList()) {
+            totalSize += d.getSize();
+        }
+        holeChunkFile.setSize(totalSize);
+
+        String targetVnodeId = MetaKeyUtils.getTargetVnodeId(inode.getBucket());
+        myRocksDB.saveINodeMetaData(targetVnodeId, inode);
+        myRocksDB.saveChunkFileMetaData(ChunkFile.getChunkKey(holeFileName), holeChunkFile);
     }
 
     public static void createData(List<Inode.InodeData> list, Inode.InodeData data, Inode inode, byte[] dataToWrite) throws JsonProcessingException {
         String chunkKey = ChunkFile.getChunkKey(data.fileName);
         Inode.InodeData chunk = ChunkFile.newChunk(data.fileName, data, inode);
         ChunkFile chunkFile = ChunkFile.builder().nodeId(inode.getNodeId()).bucket(inode.getBucket()).objName(inode.getObjName())
-                .versionId(inode.getVersionId()).versionNum(MetaKeyUtils.getVersionNum()).size(data.size).chunkList(new ArrayList<>()).build();
+                .versionId(inode.getVersionId()).versionNum(MetaKeyUtils.getVersionNum()).size(data.size).chunkList(new ArrayList<>()).hasDeleteFiles(new LinkedList<>()).build();
 
         String vnodeId = data.fetchInodeDataTargetVnodeId();
         List<Long> link = Arrays.asList(((long) Long.parseLong(vnodeId)));
@@ -1071,17 +1083,18 @@ public class Nfsv3Server extends AbstractVerticle {
         chunkFile.getChunkList().add(data);
         list.add(chunk);
 
+
         long totalSize = 0;
+        for (Inode.InodeData d : chunkFile.getChunkList()) {
+            totalSize += d.getSize();
+        }
+        chunkFile.setSize(totalSize);
+        totalSize = 0;
         for (Inode.InodeData d : inode.getInodeData()) {
             totalSize += d.getSize();
         }
         inode.setSize(totalSize);
 
-        totalSize = 0;
-        for (Inode.InodeData d : chunkFile.getChunkList()) {
-            totalSize += d.getSize();
-        }
-        chunkFile.setSize(totalSize);
 
         myRocksDB.saveINodeMetaData(targetVnodeId, inode);
         myRocksDB.saveChunkFileMetaData(chunkKey, chunkFile);
@@ -1160,7 +1173,8 @@ public class Nfsv3Server extends AbstractVerticle {
             if (reqOffset >= inode.getSize()) {
                 if (reqOffset > inode.getSize()) {
                     if (list.isEmpty()) {
-                        creatHole(list, Inode.InodeData.newHoleFile(dataOfLength), inode);
+                        creatHole(list, Inode.InodeData.newHoleFile(reqOffset), inode);
+                        createData(list, inodeData, inode, dataToWrite);
                     } else {
                         creatHole(list, Inode.InodeData.newHoleFile(reqOffset - inode.getSize()), inode);
                         createData(list, inodeData, inode, dataToWrite);
@@ -1177,7 +1191,7 @@ public class Nfsv3Server extends AbstractVerticle {
                 String chunkKey = ChunkFile.getChunkKeyFromChunkFileName(inode.getBucket(), last.fileName);
                 ChunkFile chunkFile = myRocksDB.getChunkFileMetaData(chunkKey).orElseThrow(() -> new RuntimeException("chunk file not found..."));
                 Inode.partialOverwrite3(chunkFile, reqOffset, inodeData);
-                myRocksDB.saveChunkFileMetaData(chunkKey, chunkFile);
+                //myRocksDB.saveChunkFileMetaData(chunkKey, chunkFile);
 
                 String vnodeId = inodeData.fetchInodeDataTargetVnodeId();
                 List<Long> link = Arrays.asList(((long) Long.parseLong(vnodeId)));
@@ -1187,6 +1201,33 @@ public class Nfsv3Server extends AbstractVerticle {
                 String targetVnodeId = MetaKeyUtils.getTargetVnodeId(inode.getBucket());
                 String verisonKey = MetaKeyUtils.getVersionMetaDataKey(targetVnodeId, inode.getBucket(), inode.getObjName(), inode.getVersionId());
                 myRocksDB.saveFileMetaData(inodeData.getFileName(), verisonKey, dataToWrite, dataToWrite.length,true);
+
+                long totalSize = 0;
+                int chunkNum = 0;
+                for (Inode.InodeData d : chunkFile.getChunkList()) {
+                    totalSize += d.getSize();
+                    if (!inode.getInodeData().contains(d)) {
+                        //Inode.InodeData newchunk = ChunkFile.newChunk(inodeData.fileName, inodeData, inode);
+                        //inode.getInodeData().add(newchunk);
+                        chunkNum++;
+                    }
+                    //chunkNum++;
+                }
+
+
+//                totalSize = 0;
+//                for (Inode.InodeData d : inode.getInodeData()) {
+//                    totalSize += d.getSize();
+//                    //chunkNum++;
+//                }
+                inode.setSize(totalSize);
+                chunkFile.setSize(totalSize);
+                Inode.InodeData pivot = inode.getInodeData().get(0);
+                pivot.setChunkNum(chunkNum);
+                pivot.setSize(totalSize);
+
+                myRocksDB.saveINodeMetaData(targetVnodeId, inode);
+                myRocksDB.saveChunkFileMetaData(chunkKey, chunkFile);
             }
             //myRocksDB.saveMetaData(targetVnodeId, bucket, object, filename, dataOfLength, "text/plain", false);
             //long fileOffset = myRocksDB.saveFileData(filename, versionKey, dataOfLength, data, false);
