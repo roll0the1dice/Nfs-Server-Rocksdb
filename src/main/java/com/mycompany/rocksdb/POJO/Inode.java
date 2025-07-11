@@ -22,6 +22,8 @@ import static com.mycompany.rocksdb.constant.GlobalConstant.ROCKS_INODE_PREFIX;
 
 @Data
 @Builder
+@AllArgsConstructor
+@NoArgsConstructor
 @JsonInclude(JsonInclude.Include.NON_DEFAULT)
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class Inode {

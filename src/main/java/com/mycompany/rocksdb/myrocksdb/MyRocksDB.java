@@ -62,9 +62,9 @@ public class MyRocksDB
     public static final FreeListSpaceManager manager = new FreeListSpaceManager(START_OFFSET);
 
 
-    public static final String INDEX_LUN = "fs-SP0-8-index";
-    public static final String DATA_LUN = "fs-SP0-4";
-    public static final Path SAVE_TO_DATA_PATH = Paths.get("/dev/sdg2");
+    public static final String INDEX_LUN = "fs-SP0-7-index";
+    public static final String DATA_LUN = "fs-SP0-3";
+    public static final Path SAVE_TO_DATA_PATH = Paths.get("/dev/sdf2");
 
     public MyRocksDB() {
         init();
@@ -392,6 +392,7 @@ public long saveFileMetaData(String fileName, String verisonKey, byte[] dataToWr
                     .metaKey(verisonKey).offset(Arrays.asList(fileOffset)).len(Arrays.asList(len)).lun(lun).build());
         }
 
+        logger.error("FileMetaData: {}", fileMetadata);
         db.put(fileMetaKey.getBytes(StandardCharsets.UTF_8), objectMapper.writeValueAsBytes(fileMetadata.get()));
 
         return fileOffset;
