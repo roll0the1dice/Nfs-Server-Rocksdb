@@ -102,4 +102,17 @@ public class MetaKeyUtils {
     public static String getTargetVnodeId(String bucketName) {
         return MsVnodeUtils.getTargetVnodeId(bucketName, VNODE_NUM);
     }
+
+    public static String getHoleFileName(String bucket, String requestId) {
+        Tuple2<String, String> tuple = MsVnodeUtils.getObjectVnodeId(bucket, "", VNODE_NUM);
+
+        String objVnode = tuple.getT1();
+
+        return File.separator + String.join("_",
+                new String[]{objVnode,
+                        bucket,
+                        "",
+                        requestId});
+    }
+
 }
