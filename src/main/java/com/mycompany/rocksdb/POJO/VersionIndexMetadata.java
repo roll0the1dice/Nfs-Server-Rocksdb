@@ -1,5 +1,7 @@
 package com.mycompany.rocksdb.POJO;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -10,6 +12,8 @@ import lombok.NoArgsConstructor;
 @AllArgsConstructor
 @NoArgsConstructor
 @Builder
+@JsonInclude(JsonInclude.Include.NON_DEFAULT)
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class VersionIndexMetadata {
   @JsonProperty("sysMetaData")
   private String sysMetaData;
@@ -59,6 +63,12 @@ public class VersionIndexMetadata {
   @JsonProperty("bucket")
   private String bucket;
 
+  @JsonProperty("inode")
+  private long inode;
+
+  @JsonProperty("cookie")
+  private long cookie;
+
   public static LatestIndexMetadata toLatestIndexMetadata(VersionIndexMetadata indexMetadata) {
     if (indexMetadata == null) {
       return null;
@@ -75,6 +85,8 @@ public class VersionIndexMetadata {
     minusIndexMetadata.setStorage(indexMetadata.getStorage());
     minusIndexMetadata.setKey(indexMetadata.getKey());
     minusIndexMetadata.setBucket(indexMetadata.getBucket());
+    minusIndexMetadata.setInode(indexMetadata.getInode());
+    minusIndexMetadata.setCookie(indexMetadata.getCookie());
 
     // 对于 MinusIndexMetadata 中有而 IndexMetadata 中没有的字段 (shardingStamp)，
     // 这里会保留其默认值 (null)。如果需要从其他地方获取，可以在这里设置。
@@ -99,6 +111,8 @@ public class VersionIndexMetadata {
     indexMetadata.setStorage(versionIndexMetadata.getStorage());
     indexMetadata.setKey(versionIndexMetadata.getKey());
     indexMetadata.setBucket(versionIndexMetadata.getBucket());
+    indexMetadata.setInode(versionIndexMetadata.getInode());
+    indexMetadata.setCookie(versionIndexMetadata.getCookie());
 
     // 对于 MinusIndexMetadata 中有而 IndexMetadata 中没有的字段 (shardingStamp)，
     // 这里会保留其默认值 (null)。如果需要从其他地方获取，可以在这里设置。

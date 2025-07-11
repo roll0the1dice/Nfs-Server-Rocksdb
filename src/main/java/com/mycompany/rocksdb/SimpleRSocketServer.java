@@ -1,7 +1,10 @@
 package com.mycompany.rocksdb;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.mycompany.rocksdb.POJO.ChunkFile;
+import com.mycompany.rocksdb.POJO.Inode;
 import com.mycompany.rocksdb.netserver.Nfsv3Server;
+import com.mycompany.rocksdb.utils.MetaKeyUtils;
 import com.sun.org.apache.regexp.internal.RE;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
@@ -26,6 +29,8 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.Arrays;
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -64,6 +69,9 @@ public class SimpleRSocketServer extends AbstractRSocket {
         CONTINUE,              // 继续响应
         PUT_INDEX_META_DATA,    // 存META数据
         PUT_REDIS_DATA,        // 存redis里的数据
+        PUT_CHUNKFILE_META_DATA,
+        PUT_INODE_META_DATA,
+        GET_CHUNKFILE_META_DATA
     }
 
     public SimpleRSocketServer() {
@@ -88,6 +96,15 @@ public class SimpleRSocketServer extends AbstractRSocket {
                     return handleGetObject(payload);
                 case PUT_INDEX_META_DATA:
                     return handlePutMetadata(payload);
+                case PUT_REDIS_DATA:
+                    return handlePutRedisdata(payload);
+                case PUT_CHUNKFILE_META_DATA:
+                    return handleSaveChunkFileMetaData(payload);
+                case GET_CHUNKFILE_META_DATA:
+                    return handleGetChunkFileMetaData(payload);
+                case PUT_INODE_META_DATA:
+                    return handleSaveINodeMetaData(payload);
+
                 default:
                     return Mono.just(DefaultPayload.create("Unsupported operation", PayloadMetaType.ERROR.name()));
             }
@@ -304,6 +321,90 @@ public class SimpleRSocketServer extends AbstractRSocket {
             Nfsv3Server.getMyRocksDB().saveIndexMetaData(targetVnodeId, bucket, object, fileName, Long.parseLong(contentLength), contentType, false);
             log.info("Metadata stored: {}", metadata);
             return Mono.just(DefaultPayload.create("Metadata stored", PayloadMetaType.SUCCESS.name()));
+        } catch (Exception e) {
+            log.error("Put metadata error", e);
+            return Mono.just(DefaultPayload.create("Put metadata failed: " + e.getMessage(), PayloadMetaType.ERROR.name()));
+        }
+    }
+
+    /**
+     * 处理元数据上传
+     */
+    private Mono<Payload> handlePutRedisdata(Payload payload) {
+        try {
+            String metadata = payload.getDataUtf8();
+            ObjectMapper objectMapper = new ObjectMapper();
+            SocketReqMsg socketReqMsg = objectMapper.readValue(metadata, SocketReqMsg.class);
+            String bucket = socketReqMsg.get("bucket");
+            String object = socketReqMsg.get("object");
+            String objectVnodeId = MetaKeyUtils.getObjectVnodeId(bucket, object);
+            List<Long> link = Arrays.asList(((long) Long.parseLong(objectVnodeId)));
+            //String s_uuid = "0001";
+            String s_uuid = socketReqMsg.get("s_uuid");
+
+            Nfsv3Server.getMyRocksDB().saveRedis(objectVnodeId, link, s_uuid);
+            log.info("Redis data stored: {}", metadata);
+            return Mono.just(DefaultPayload.create("Redis data stored", PayloadMetaType.SUCCESS.name()));
+        } catch (Exception e) {
+            log.error("Put Redis data error", e);
+            return Mono.just(DefaultPayload.create("Put Redis data failed: " + e.getMessage(), PayloadMetaType.ERROR.name()));
+        }
+    }
+
+    private Mono<Payload> handleGetChunkFileMetaData(Payload payload) {
+        try {
+            String metadata = payload.getDataUtf8();
+            //String fileName = extractFileName(metadata);
+            ObjectMapper objectMapper = new ObjectMapper();
+            SocketReqMsg socketReqMsg = objectMapper.readValue(metadata, SocketReqMsg.class);
+            String chunkFileKey = socketReqMsg.get("chunkFileKey");
+
+            // 这里可以根据实际需求将元数据存储到文件、数据库或内存等
+            // 示例：简单写入到一个本地文件
+            ChunkFile chunkFile = Nfsv3Server.getMyRocksDB().getChunkFileMetaData(chunkFileKey).orElseThrow(() -> new RuntimeException("handleGetChunkFileMetaData Error!!!!!!"));
+            log.info("Metadata stored: {}", chunkFile);
+            return Mono.just(DefaultPayload.create(objectMapper.writeValueAsBytes(chunkFile), PayloadMetaType.SUCCESS.name().getBytes()));
+        } catch (Exception e) {
+            log.error("Put metadata error", e);
+            return Mono.just(DefaultPayload.create("Put metadata failed: " + e.getMessage(), PayloadMetaType.ERROR.name()));
+        }
+    }
+
+    private Mono<Payload> handleSaveChunkFileMetaData(Payload payload) {
+        try {
+            String metadata = payload.getDataUtf8();
+            //String fileName = extractFileName(metadata);
+            ObjectMapper objectMapper = new ObjectMapper();
+            SocketReqMsg socketReqMsg = objectMapper.readValue(metadata, SocketReqMsg.class);
+            String chunkKey = socketReqMsg.get("chunkKey");
+            ChunkFile chunkFile =  objectMapper.readValue(socketReqMsg.get("chunkFile"), com.mycompany.rocksdb.POJO.ChunkFile.class);
+
+            // 这里可以根据实际需求将元数据存储到文件、数据库或内存等
+            // 示例：简单写入到一个本地文件
+            Nfsv3Server.getMyRocksDB().saveChunkFileMetaData(chunkKey, chunkFile);
+            log.info("Metadata stored: {}", chunkFile);
+            return Mono.just(DefaultPayload.create("handleSaveChunkFileMetaData sucess", PayloadMetaType.SUCCESS.name()));
+        } catch (Exception e) {
+            log.error("Put metadata error", e);
+            return Mono.just(DefaultPayload.create("Put metadata failed: " + e.getMessage(), PayloadMetaType.ERROR.name()));
+        }
+    }
+
+
+    private Mono<Payload> handleSaveINodeMetaData(Payload payload) {
+        try {
+            String metadata = payload.getDataUtf8();
+            //String fileName = extractFileName(metadata);
+            ObjectMapper objectMapper = new ObjectMapper();
+            SocketReqMsg socketReqMsg = objectMapper.readValue(metadata, SocketReqMsg.class);
+            String targetVnodeId = socketReqMsg.get("targetVnodeId");
+            Inode inode =  objectMapper.readValue(socketReqMsg.get("inode"), Inode.class);
+
+            // 这里可以根据实际需求将元数据存储到文件、数据库或内存等
+            // 示例：简单写入到一个本地文件
+            Nfsv3Server.getMyRocksDB().saveINodeMetaData(targetVnodeId, inode);
+            log.info("Metadata stored: {}", inode);
+            return Mono.just(DefaultPayload.create("handleSaveINodeMetaData sucess", PayloadMetaType.SUCCESS.name()));
         } catch (Exception e) {
             log.error("Put metadata error", e);
             return Mono.just(DefaultPayload.create("Put metadata failed: " + e.getMessage(), PayloadMetaType.ERROR.name()));

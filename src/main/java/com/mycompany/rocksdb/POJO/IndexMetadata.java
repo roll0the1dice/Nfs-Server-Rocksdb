@@ -1,5 +1,7 @@
 package com.mycompany.rocksdb.POJO;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.AllArgsConstructor;
 import lombok.Data;
@@ -8,6 +10,8 @@ import lombok.NoArgsConstructor;
 @Data
 @AllArgsConstructor
 @NoArgsConstructor
+@JsonInclude(JsonInclude.Include.NON_DEFAULT)
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class IndexMetadata {
     @JsonProperty("sysMetaData")
     private String sysMetaData;
@@ -35,4 +39,10 @@ public class IndexMetadata {
 
     @JsonProperty("bucket")
     private String bucket;
+
+    @JsonProperty("inode")
+    private long inode;
+
+    @JsonProperty("cookie")
+    private long cookie;
 }

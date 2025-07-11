@@ -4,6 +4,10 @@ public class GlobalConstant {
     public static final String ROCKS_FILE_SYSTEM_PREFIX = ".";
     // .1.
     public static final String ROCKS_FILE_SYSTEM_PREFIX_OFFSET = ROCKS_FILE_SYSTEM_PREFIX + "1" + ROCKS_FILE_SYSTEM_PREFIX;
+
+    public static final String ROCKS_CHUNK_FILE_KEY = ")";
+
+    public static final String ROCKS_INODE_PREFIX = "(";
     // 4KB
     public static final int BLOCK_SIZE = 4 * 1024 ;
     // 16 MB
