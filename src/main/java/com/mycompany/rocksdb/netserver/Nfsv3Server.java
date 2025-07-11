@@ -1,6 +1,7 @@
 package com.mycompany.rocksdb.netserver;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mycompany.rocksdb.POJO.ChunkFile;
 import com.mycompany.rocksdb.POJO.Inode;
 import com.mycompany.rocksdb.POJO.FileMetadata;
@@ -103,7 +104,7 @@ public class Nfsv3Server extends AbstractVerticle {
     private static final Path SAVE_DATA_PATH = Paths.get("/dev/sdg2");
     public static final String BUCK_NAME = "1212";
 
-    //private static final SimpleRSocketClient simpleRSocketClient = new SimpleRSocketClient(CONJUGATE_RSOCKET_PORT, RSOCKET_PORT);
+    private static final SimpleRSocketClient simpleRSocketClient = new SimpleRSocketClient(CONJUGATE_RSOCKET_PORT, RSOCKET_PORT);
 
     public static MyRocksDB getMyRocksDB() {
         return myRocksDB;
@@ -1144,6 +1145,7 @@ public class Nfsv3Server extends AbstractVerticle {
     }
 
     public static void createData(List<Inode.InodeData> list, Inode.InodeData data, Inode inode, byte[] dataToWrite) throws JsonProcessingException {
+        ObjectMapper objectMapper = new ObjectMapper();
         String chunkKey = ChunkFile.getChunkKey(data.fileName);
         Inode.InodeData chunk = ChunkFile.newChunk(data.fileName, data, inode);
         ChunkFile chunkFile = ChunkFile.builder().nodeId(inode.getNodeId()).bucket(inode.getBucket()).objName(inode.getObjName())
@@ -1151,12 +1153,18 @@ public class Nfsv3Server extends AbstractVerticle {
 
         String vnodeId = data.fetchInodeDataTargetVnodeId();
         List<Long> link = Arrays.asList(((long) Long.parseLong(vnodeId)));
-        String s_uuid = "0002";
-        myRocksDB.saveRedis(vnodeId, link, s_uuid);
+        String s_uuid = "0001";
+        //myRocksDB.saveRedis(vnodeId, link, s_uuid);
+        SocketReqMsg msg3 = new SocketReqMsg("", 0)
+                .put("vnodeId", vnodeId)
+                .put("link", objectMapper.writeValueAsString(link))
+                .put("s_uuid", s_uuid);
+        simpleRSocketClient.putRedisdata(msg3).block();
 
         String targetVnodeId = MetaKeyUtils.getTargetVnodeId(inode.getBucket());
         String verisonKey = MetaKeyUtils.getVersionMetaDataKey(targetVnodeId, inode.getBucket(), inode.getObjName(), inode.getVersionId());
-        myRocksDB.saveFileMetaData(data.getFileName(), verisonKey, dataToWrite, dataToWrite.length,true);
+        //myRocksDB.saveFileMetaData(data.getFileName(), verisonKey, dataToWrite, dataToWrite.length,true);
+        simpleRSocketClient.uploadSmallFile(data.getFileName(), verisonKey, dataToWrite, dataToWrite.length, true).block();
 
         chunkFile.getChunkList().add(data);
         list.add(chunk);
@@ -1173,30 +1181,53 @@ public class Nfsv3Server extends AbstractVerticle {
         }
         inode.setSize(totalSize);
 
-
-        myRocksDB.saveINodeMetaData(targetVnodeId, inode);
-        myRocksDB.saveChunkFileMetaData(chunkKey, chunkFile);
+        SocketReqMsg msg4 = new SocketReqMsg("", 0)
+                .put("targetVnodeId", targetVnodeId)
+                .put("inode", objectMapper.writeValueAsString(inode));
+        simpleRSocketClient.putINodeMetaData(msg4).block();
+        SocketReqMsg msg5 = new SocketReqMsg("", 0)
+                .put("chunkKey", chunkKey)
+                .put("chunkFile", objectMapper.writeValueAsString(chunkFile));
+        simpleRSocketClient.putChunkFileMetaData(msg5).block();
+        //myRocksDB.saveINodeMetaData(targetVnodeId, inode);
+        //myRocksDB.saveChunkFileMetaData(chunkKey, chunkFile);
     }
 
-    public static void appendData(List<Inode.InodeData> list, Inode.InodeData data, Inode inode, byte[] dataToWrite) throws JsonProcessingException {
+    public static void appendData(List<Inode.InodeData> list, Inode.InodeData data, Inode inode, byte[] dataToWrite) throws IOException {
         if (list.isEmpty()) {
             createData(list, data, inode, dataToWrite);
         }
         else {
             Inode.InodeData last = list.get(list.size() - 1);
             String chunkKey = ChunkFile.getChunkKeyFromChunkFileName(inode.getBucket(), last.fileName);
-            ChunkFile chunkFile = myRocksDB.getChunkFileMetaData(chunkKey).orElseThrow(() -> new RuntimeException("chunk file not found..."));
+            //ChunkFile chunkFile = myRocksDB.getChunkFileMetaData(chunkKey).orElseThrow(() -> new RuntimeException("chunk file not found..."));
+            SocketReqMsg msg = new SocketReqMsg("", 0)
+                    .put("chunkKey", chunkKey);
+            ObjectMapper objectMapper = new ObjectMapper();
+            ChunkFile chunkFile = objectMapper.readValue(simpleRSocketClient.getChunkFileMetaData(msg).block(), ChunkFile.class);
             chunkFile.getChunkList().add(data);
-            myRocksDB.saveChunkFileMetaData(chunkKey, chunkFile);
+
+            SocketReqMsg msg2 = new SocketReqMsg("", 0)
+                    .put("chunkKey", chunkKey)
+                    .put("chunkFile", objectMapper.writeValueAsString(chunkFile));
+            simpleRSocketClient.putChunkFileMetaData(msg2).block();
+            //myRocksDB.saveChunkFileMetaData(chunkKey, chunkFile);
 
             String vnodeId = data.fetchInodeDataTargetVnodeId();
             List<Long> link = Arrays.asList(((long) Long.parseLong(vnodeId)));
-            String s_uuid = "0002";
-            myRocksDB.saveRedis(vnodeId, link, s_uuid);
+            String s_uuid = "0001";
+            SocketReqMsg msg3 = new SocketReqMsg("", 0)
+                    .put("vnodeId", vnodeId)
+                    .put("link", objectMapper.writeValueAsString(link))
+                    .put("s_uuid", s_uuid);
+            simpleRSocketClient.putRedisdata(msg3).block();
+            //myRocksDB.saveRedis(vnodeId, link, s_uuid);
 
             String targetVnodeId = MetaKeyUtils.getTargetVnodeId(inode.getBucket());
             String verisonKey = MetaKeyUtils.getVersionMetaDataKey(targetVnodeId, inode.getBucket(), inode.getObjName(), null);
-            myRocksDB.saveFileMetaData(data.getFileName(), verisonKey, dataToWrite, dataToWrite.length, true);
+            simpleRSocketClient.uploadSmallFile(data.getFileName(), verisonKey, dataToWrite, dataToWrite.length, true).block();
+            //simpleRSocketClient.putChunkFileMetaData(msg2).block();
+            //myRocksDB.saveFileMetaData(data.getFileName(), verisonKey, dataToWrite, dataToWrite.length, true);
 
             long totalSize = 0;
             int chunkNum = 0;
@@ -1222,8 +1253,17 @@ public class Nfsv3Server extends AbstractVerticle {
             pivot.setChunkNum(chunkNum);
             pivot.setSize(totalSize);
 
-            myRocksDB.saveINodeMetaData(targetVnodeId, inode);
-            myRocksDB.saveChunkFileMetaData(chunkKey, chunkFile);
+
+            SocketReqMsg msg4 = new SocketReqMsg("", 0)
+                    .put("targetVnodeId", targetVnodeId)
+                    .put("inode", objectMapper.writeValueAsString(inode));
+            simpleRSocketClient.putINodeMetaData(msg4).block();
+            SocketReqMsg msg5 = new SocketReqMsg("", 0)
+                    .put("chunkKey", chunkKey)
+                    .put("chunkFile", objectMapper.writeValueAsString(chunkFile));
+            simpleRSocketClient.putChunkFileMetaData(msg5).block();
+            //myRocksDB.saveINodeMetaData(targetVnodeId, inode);
+            //myRocksDB.saveChunkFileMetaData(chunkKey, chunkFile);
         }
     }
 
@@ -1253,7 +1293,7 @@ public class Nfsv3Server extends AbstractVerticle {
         String object = fileHandleToFileName.get(byteArrayKeyWrapper);
         Inode inode = fileHandleToINode.get(byteArrayKeyWrapper);
 
-        if (attributes != null && object != null) {
+        if (attributes != null && object != null && inode != null) {
 
             fileHandleToOffset.compute(byteArrayKeyWrapper, (key, value) -> {
                if (value == null) {
@@ -1276,36 +1316,34 @@ public class Nfsv3Server extends AbstractVerticle {
 
             List<Inode.InodeData> list = inode.getInodeData();
             if (reqOffset == inode.getSize()) {
-//                if (reqOffset > inode.getSize()) {
-//                    if (list.isEmpty()) {
-//                        creatHole(list, Inode.InodeData.newHoleFile(reqOffset), inode);
-//                        createData(list, inodeData, inode, dataToWrite);
-//                    } else {
-//                        creatHole(list, Inode.InodeData.newHoleFile(reqOffset - inode.getSize()), inode);
-//                        createData(list, inodeData, inode, dataToWrite);
-//                    }
-//                }
-//                // 恰好追加
-//                else {
-                    appendData(list, inodeData, inode, dataToWrite);
-//                }
+                appendData(list, inodeData, inode, dataToWrite);
             }
             // 写入位置与当前文件数据块有交集
             else {
                 Inode.InodeData last = list.get(list.size()-1);
                 String chunkKey = ChunkFile.getChunkKeyFromChunkFileName(inode.getBucket(), last.fileName);
-                ChunkFile chunkFile = myRocksDB.getChunkFileMetaData(chunkKey).orElseThrow(() -> new RuntimeException("chunk file not found..."));
+                //ChunkFile chunkFile = myRocksDB.getChunkFileMetaData(chunkKey).orElseThrow(() -> new RuntimeException("chunk file not found..."));
+                SocketReqMsg msg = new SocketReqMsg("", 0)
+                        .put("chunkKey", chunkKey);
+                ObjectMapper objectMapper = new ObjectMapper();
+                ChunkFile chunkFile = objectMapper.readValue(simpleRSocketClient.getChunkFileMetaData(msg).block(), ChunkFile.class);
                 Inode.partialOverwrite3(chunkFile, reqOffset, inodeData);
                 //myRocksDB.saveChunkFileMetaData(chunkKey, chunkFile);
 
                 String vnodeId = inodeData.fetchInodeDataTargetVnodeId();
                 List<Long> link = Arrays.asList(((long) Long.parseLong(vnodeId)));
                 String s_uuid = "0002";
-                myRocksDB.saveRedis(vnodeId, link, s_uuid);
+                SocketReqMsg msg3 = new SocketReqMsg("", 0)
+                        .put("vnodeId", vnodeId)
+                        .put("link", objectMapper.writeValueAsString(link))
+                        .put("s_uuid", s_uuid);
+                simpleRSocketClient.putRedisdata(msg3).block();
+                //myRocksDB.saveRedis(vnodeId, link, s_uuid);
 
                 String targetVnodeId = MetaKeyUtils.getTargetVnodeId(inode.getBucket());
                 String verisonKey = MetaKeyUtils.getVersionMetaDataKey(targetVnodeId, inode.getBucket(), inode.getObjName(), inode.getVersionId());
-                myRocksDB.saveFileMetaData(inodeData.getFileName(), verisonKey, dataToWrite, dataToWrite.length,true);
+                simpleRSocketClient.uploadSmallFile(inodeData.getFileName(), verisonKey, dataToWrite, dataToWrite.length, true).block();
+                //myRocksDB.saveFileMetaData(inodeData.getFileName(), verisonKey, dataToWrite, dataToWrite.length,true);
 
                 long totalSize = 0;
                 int chunkNum = 0;
@@ -1331,8 +1369,16 @@ public class Nfsv3Server extends AbstractVerticle {
                 pivot.setChunkNum(chunkNum);
                 pivot.setSize(totalSize);
 
-                myRocksDB.saveINodeMetaData(targetVnodeId, inode);
-                myRocksDB.saveChunkFileMetaData(chunkKey, chunkFile);
+                SocketReqMsg msg4 = new SocketReqMsg("", 0)
+                        .put("targetVnodeId", targetVnodeId)
+                        .put("inode", objectMapper.writeValueAsString(inode));
+                simpleRSocketClient.putINodeMetaData(msg4).block();
+                SocketReqMsg msg5 = new SocketReqMsg("", 0)
+                        .put("chunkKey", chunkKey)
+                        .put("chunkFile", objectMapper.writeValueAsString(chunkFile));
+                simpleRSocketClient.putChunkFileMetaData(msg5).block();
+//                myRocksDB.saveINodeMetaData(targetVnodeId, inode);
+//                myRocksDB.saveChunkFileMetaData(chunkKey, chunkFile);
             }
             //myRocksDB.saveMetaData(targetVnodeId, bucket, object, filename, dataOfLength, "text/plain", false);
             //long fileOffset = myRocksDB.saveFileData(filename, versionKey, dataOfLength, data, false);
@@ -1525,18 +1571,34 @@ public class Nfsv3Server extends AbstractVerticle {
             String targetVnodeId = MetaKeyUtils.getTargetVnodeId(bucket);
             String object = name;
             String filename = MetaKeyUtils.getObjFileName(bucket, object, requestId);
-            Inode inode = myRocksDB.saveIndexMetaAndInodeData(targetVnodeId, bucket, object, filename, 0, "text/plain", true).orElseThrow(() -> new RuntimeException("no such inode.."));
+
+            //Inode inode = myRocksDB.saveIndexMetaAndInodeData(targetVnodeId, bucket, object, filename, 0, "text/plain", true).orElseThrow(() -> new RuntimeException("no such inode.."));
+            SocketReqMsg msg = new SocketReqMsg("", 0)
+                    .put("targetVnodeId", targetVnodeId)
+                    .put("bucket", bucket)
+                    .put("object", object)
+                    .put("filename", filename)
+                    .put("contentType", "text/plain")
+                    .put("isCreated", String.valueOf(true));
+            ObjectMapper objectMapper = new ObjectMapper();
+            String inodeLiteral = simpleRSocketClient.putIndexMetaAndInodeData(msg).block();
+            Inode inode = objectMapper.readValue(inodeLiteral, Inode.class);
 
             fileHandleToINode.put(new ByteArrayKeyWrapper(fileHandle), inode);
             //myRocksDB.saveINodeMetaData(targetVnodeId, inode);
 
             String vnodeId = MetaKeyUtils.getObjectVnodeId(bucket, object);
             List<Long> link = Arrays.asList(((long) Long.parseLong(vnodeId)));
-            String s_uuid = "0002";
-            myRocksDB.saveRedis(vnodeId, link, s_uuid);
+            String s_uuid = "0001";
+            SocketReqMsg msg2 = new SocketReqMsg("", 0)
+                    .put("vnodeId", vnodeId)
+                    .put("link", link.toString())
+                    .put("s_uuid", s_uuid);
+            simpleRSocketClient.putRedisdata(msg2).block();
+            //myRocksDB.saveRedis(vnodeId, link, s_uuid);
 
         }catch (Exception e) {
-            log.error("operate db fail..");
+            log.error("operate db fail.. {}", e);
         }
 
         // Record marking

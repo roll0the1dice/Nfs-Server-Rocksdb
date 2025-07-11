@@ -92,16 +92,23 @@ public class SimpleRSocketClient {
     /**
      * 上传元数据（请求-响应模式）
      */
-    public Mono<String> putMetadata(String metadata) {
+    public Mono<String> putRedisdata(SocketReqMsg msg) {
+        ObjectMapper objectMapper = new ObjectMapper();
+        byte[] metadata = null;
+        try {
+            metadata = objectMapper.writeValueAsBytes(msg);
+        } catch (JsonProcessingException e) {
+            throw new RuntimeException(e);
+        }
         return rsocket.requestResponse(
-                DefaultPayload.create(metadata.getBytes(), SimpleRSocketServer.PayloadMetaType.PUT_INDEX_META_DATA.name().getBytes())
+                DefaultPayload.create(metadata, SimpleRSocketServer.PayloadMetaType.PUT_REDIS_DATA.name().getBytes())
         ).map(payload -> payload.getDataUtf8());
     }
 
     /**
      * 上传元数据（请求-响应模式）
      */
-    public Mono<String> putMetadata(SocketReqMsg msg) {
+    public Mono<String> putIndexMetadata(SocketReqMsg msg) {
         ObjectMapper objectMapper = new ObjectMapper();
         byte[] metadata = null;
         try {
@@ -114,6 +121,109 @@ public class SimpleRSocketClient {
         ).map(payload -> payload.getDataUtf8());
     }
 
+    public Mono<String> putChunkFileMetaData(SocketReqMsg msg) {
+        ObjectMapper objectMapper = new ObjectMapper();
+        byte[] metadata = null;
+        try {
+            metadata = objectMapper.writeValueAsBytes(msg);
+        } catch (JsonProcessingException e) {
+            throw new RuntimeException(e);
+        }
+        return rsocket.requestResponse(
+                DefaultPayload.create(metadata, SimpleRSocketServer.PayloadMetaType.PUT_CHUNKFILE_META_DATA.name().getBytes())
+        ).map(payload -> payload.getDataUtf8());
+    }
+
+    public Mono<String> getChunkFileMetaData(SocketReqMsg msg) {
+        ObjectMapper objectMapper = new ObjectMapper();
+        byte[] metadata = null;
+        try {
+            metadata = objectMapper.writeValueAsBytes(msg);
+        } catch (JsonProcessingException e) {
+            throw new RuntimeException(e);
+        }
+        return rsocket.requestResponse(
+                DefaultPayload.create(metadata, SimpleRSocketServer.PayloadMetaType.GET_CHUNKFILE_META_DATA.name().getBytes())
+        ).map(payload -> payload.getDataUtf8());
+    }
+
+    public Mono<String> putINodeMetaData(SocketReqMsg msg) {
+        ObjectMapper objectMapper = new ObjectMapper();
+        byte[] metadata = null;
+        try {
+            metadata = objectMapper.writeValueAsBytes(msg);
+        } catch (JsonProcessingException e) {
+            throw new RuntimeException(e);
+        }
+        return rsocket.requestResponse(
+                DefaultPayload.create(metadata, SimpleRSocketServer.PayloadMetaType.PUT_INODE_META_DATA.name().getBytes())
+        ).map(payload -> payload.getDataUtf8());
+    }
+
+    public Mono<String> putIndexMetaAndInodeData(SocketReqMsg msg) {
+        ObjectMapper objectMapper = new ObjectMapper();
+        byte[] metadata = null;
+        try {
+            metadata = objectMapper.writeValueAsBytes(msg);
+        } catch (JsonProcessingException e) {
+            throw new RuntimeException(e);
+        }
+        return rsocket.requestResponse(
+                DefaultPayload.create(metadata, SimpleRSocketServer.PayloadMetaType.PUT_INDEX_META_AND_INODE_DATA.name().getBytes())
+        ).map(payload -> payload.getDataUtf8())
+                .doOnNext(b -> {
+                    System.out.println("putIndexMetaAndInodeData: " + b);
+                });
+    }
+
+
+    public Mono<String> uploadSmallFile(String fileName, String verisonKey, byte[] dataToWrite, long count, boolean isCreated) {
+        try {
+            // 构建元数据
+            ObjectMapper objectMapper = new ObjectMapper();
+            SocketReqMsg msg = new SocketReqMsg("", 0)
+                    .put("filename", fileName)
+                    .put("verisonKey", verisonKey)
+                    .put("count", String.valueOf(count))
+                    .put("isCreated", String.valueOf(isCreated));
+            byte[] metadataBytes = objectMapper.writeValueAsBytes(msg);
+
+            Flux<io.rsocket.Payload> payloadFlux = Flux.concat(
+                    // 发送开始请求
+                    Mono.just(DefaultPayload.create(metadataBytes,
+                            SimpleRSocketServer.PayloadMetaType.START_PUT_OBJECT.name().getBytes())),
+                    // 发送数据块
+
+                    Mono.just(DefaultPayload.create(dataToWrite,
+                            SimpleRSocketServer.PayloadMetaType.PUT_OBJECT.name().getBytes())),
+
+                    // 发送完成请求
+                    Mono.just(DefaultPayload.create(metadataBytes,
+                            SimpleRSocketServer.PayloadMetaType.COMPLETE_PUT_OBJECT.name().getBytes()))
+            );
+
+            return rsocket.requestChannel(payloadFlux)
+                    .last()
+                    .map(payload -> payload.getDataUtf8());
+
+        } catch (IOException e) {
+            log.error("Failed to read file: {}", e);
+            return Mono.error(e);
+        }
+    }
+
+    public Mono<String> putMetadata(SocketReqMsg msg) {
+        ObjectMapper objectMapper = new ObjectMapper();
+        byte[] metadata = null;
+        try {
+            metadata = objectMapper.writeValueAsBytes(msg);
+        } catch (JsonProcessingException e) {
+            throw new RuntimeException(e);
+        }
+        return rsocket.requestResponse(
+                DefaultPayload.create(metadata, SimpleRSocketServer.PayloadMetaType.PUT_INDEX_META_DATA.name().getBytes())
+        ).map(payload -> payload.getDataUtf8());
+    }
 
     /**
      * 大文件分块上传（流式模式，InputStream分块读取）
