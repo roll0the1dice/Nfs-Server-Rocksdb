@@ -27,6 +27,7 @@ import io.vertx.core.net.NetSocket;
 import io.vertx.core.parsetools.RecordParser;
 import lombok.Getter;
 import org.apache.commons.codec.DecoderException;
+import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -937,11 +938,52 @@ public class Nfsv3Server extends AbstractVerticle {
         return buffer.array();
     }
 
+    public static List<Inode.InodeData> partialRead(ChunkFile chunkFile, long readOffset, long readSize) {
+        List<Inode.InodeData> result = new ArrayList<>();
+        long curOffset = 0L;
+        long readEnd = readOffset + readSize;
+
+        long calOffset = 0;
+        for (Inode.InodeData cur : chunkFile.getChunkList()) {
+            cur.offset = calOffset;
+            calOffset += cur.size;
+
+            long curEnd = curOffset + cur.size;
+
+            // 当前块完全在读取区间左侧，跳过
+            if (curEnd <= readOffset) {
+                curOffset = curEnd;
+                continue;
+            }
+
+            // 当前块完全在读取区间右侧，结束
+            if (curOffset >= readEnd) {
+                break;
+            }
+
+            // 计算重叠区间
+            long overlapStart = Math.max(curOffset, readOffset);
+            long overlapEnd = Math.min(curEnd, readEnd);
+
+            if (overlapStart < overlapEnd) {
+                // 构造只包含重叠部分的新 InodeData
+                Inode.InodeData part = new Inode.InodeData(cur);
+                part.offset = cur.offset + (overlapStart - curOffset);
+                part.size = overlapEnd - overlapStart;
+                result.add(part);
+            }
+
+            curOffset = curEnd;
+        }
+
+        return result;
+    }
+
     private byte[] createNfsReadReply(int xid, Buffer request, int startOffset) throws IOException {
         // Parse file handle, offset, and count from request
         int fhandleLength = request.getInt(startOffset);
         byte[] fhandle = request.slice(startOffset + 4, startOffset + 4 + fhandleLength).getBytes();
-        long offset = request.getLong(startOffset + 4 + fhandleLength);
+        long readOffset = request.getLong(startOffset + 4 + fhandleLength);
         int count = request.getInt(startOffset + 4 + fhandleLength + 8);
 
         ByteBuffer buffer = ByteBuffer.allocate(count);
@@ -958,36 +1000,72 @@ public class Nfsv3Server extends AbstractVerticle {
         //long fileOffset = fileHandleToOffset.get(byteArrayKeyWrapper).get(offset);
 
         String bucket = BUCK_NAME;
-        String targetVnodeId = MetaKeyUtils.getTargetVnodeId(bucket);
-        String filename = MetaKeyUtils.getObjFileName(bucket, name, requestId);
-        Optional<FileMetadata> fileMetadataOptional = myRocksDB.getFileMetaData(filename);
+
         Optional<READ3res> read3resOptinal = Optional.empty();
-        if (fileMetadataOptional.isPresent()) {
-            FileMetadata fileMetadata = fileMetadataOptional.get();
-            List<Long> offsets = fileMetadata.getOffset();
-            List<Long> lens = fileMetadata.getLen();
+        Inode inode = fileHandleToINode.get(byteArrayKeyWrapper);
+        if (inode != null) {
+            List<Inode.InodeData> list = inode.getInodeData();
+            if (!list.isEmpty()) {
+                Inode.InodeData last = list.get(list.size() - 1);
+                String chunkKey = ChunkFile.getChunkKeyFromChunkFileName(inode.getBucket(), last.fileName);
+                ChunkFile chunkFile = myRocksDB.getChunkFileMetaData(chunkKey).orElseThrow(() -> new RuntimeException("chunk file not found..."));
 
-            List<byte[]> dataList = readSegment(offsets, lens, count);
-            byte[] data = mergeWithByteBuffer(dataList);
-            int dataLength = data.length / 4 * 4 + 4;
+                List<Inode.InodeData> readChunk = partialRead(chunkFile, readOffset, count);
 
+                if (readChunk.size() > 0) {
+                    List<byte[]> allData = new ArrayList<>();
+                    for (Inode.InodeData inodeData : readChunk) {
+                        if (!StringUtils.isBlank(inodeData.getFileName())) {
+                            FileMetadata fileMetadata = myRocksDB.getFileMetaData(inodeData.getFileName()).orElseThrow(() -> new RuntimeException("readChunk failed..."));
+                            List<Long> offsets = fileMetadata.getOffset();
+                            List<Long> lens = fileMetadata.getLen();
 
-            FAttr3 fAttr3 = fileHandleToFAttr3.getOrDefault(new ByteArrayKeyWrapper(fhandle), null);
-            PostOpAttr fileAttributes = PostOpAttr.builder()
-                    .attributesFollow(fAttr3 != null ? 1 : 0)
-                    .attributes(fAttr3)
-                    .build();
+                            List<byte[]> dataList = readSegment(offsets, lens, inodeData.size);
+                            byte[] tmpData = mergeWithByteBuffer(dataList);
 
-            READ3resok read3resok = READ3resok.builder()
-                    .fileAttributes(fileAttributes)
-                    .count(dataLength)
-                    .eof(1)
-                    .dataOfLength(dataLength)
-                    .data(data)
-                    .build();
+                            // 1. 创建一个大小为 size 的新数组
+                            byte[] resultData = new byte[(int) inodeData.size];
+                            // 2. 使用 System.arraycopy() 进行复制
+                            System.arraycopy(tmpData, (int) inodeData.offset, resultData, 0, (int) inodeData.size);
 
-            read3resOptinal = Optional.of(READ3res.createOk(read3resok));
-        } else {
+                            allData.add(resultData);
+                        } else {
+                            byte[] byteArray = new byte[(int)inodeData.size];
+                            allData.add(byteArray);
+                        }
+                    }
+
+                    byte[] data = mergeWithByteBuffer(allData);
+                    int dataLength = data.length / 4 * 4 + 4;
+
+                    FAttr3 fAttr3 = fileHandleToFAttr3.getOrDefault(new ByteArrayKeyWrapper(fhandle), null);
+                    PostOpAttr fileAttributes = PostOpAttr.builder()
+                            .attributesFollow(fAttr3 != null ? 1 : 0)
+                            .attributes(fAttr3)
+                            .build();
+
+                    READ3resok read3resok = READ3resok.builder()
+                            .fileAttributes(fileAttributes)
+                            .count(dataLength)
+                            .eof(1)
+                            .dataOfLength(dataLength)
+                            .data(data)
+                            .build();
+
+                    read3resOptinal = Optional.of(READ3res.createOk(read3resok));
+                } else {
+                    PostOpAttr fileAttributes = PostOpAttr.builder().attributesFollow(0).build();
+                    READ3resfail read3resfail = READ3resfail.builder().fileAttributes(fileAttributes).build();
+                    read3resOptinal = Optional.of(READ3res.createFail(NfsStat3.NFS3ERR_NOENT, read3resfail));
+                }
+
+            } else {
+                PostOpAttr fileAttributes = PostOpAttr.builder().attributesFollow(0).build();
+                READ3resfail read3resfail = READ3resfail.builder().fileAttributes(fileAttributes).build();
+                read3resOptinal = Optional.of(READ3res.createFail(NfsStat3.NFS3ERR_NOENT, read3resfail));
+            }
+
+        }else {
             PostOpAttr fileAttributes = PostOpAttr.builder().attributesFollow(0).build();
             READ3resfail read3resfail = READ3resfail.builder().fileAttributes(fileAttributes).build();
             read3resOptinal = Optional.of(READ3res.createFail(NfsStat3.NFS3ERR_NOENT, read3resfail));
@@ -1019,7 +1097,7 @@ public class Nfsv3Server extends AbstractVerticle {
 
         List<byte[]> result = new ArrayList<>();
 
-        for (int i = 0; i < offsets.size(); i++) {
+        for (int i = 0; i < offsets.size() && size > 0; i++) {
             long offset = offsets.get(i);
             long len = lens.get(i);
             int length = (int)Math.min(len, size);
@@ -1271,8 +1349,8 @@ public class Nfsv3Server extends AbstractVerticle {
 
             FAttr3 attritbutes = fileHandleToFAttr3.computeIfPresent(byteArrayKeyWrapper, (key, value) -> {
                 synchronized (value) {
-                    long used = count / BLOCK_SIZE * BLOCK_SIZE + BLOCK_SIZE;
-                    value.setSize(value.getSize() + count);
+                    long used = inode.getSize() / BLOCK_SIZE * BLOCK_SIZE + BLOCK_SIZE;
+                    value.setSize(inode.getSize());
                     value.setUsed(used);
                 }
                 return value;

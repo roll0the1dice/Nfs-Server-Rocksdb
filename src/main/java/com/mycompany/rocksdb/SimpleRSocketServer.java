@@ -2,6 +2,7 @@ package com.mycompany.rocksdb;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mycompany.rocksdb.netserver.Nfsv3Server;
+import com.sun.org.apache.regexp.internal.RE;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.rsocket.*;
@@ -61,7 +62,8 @@ public class SimpleRSocketServer extends AbstractRSocket {
         SUCCESS,              // 成功响应
         ERROR,                // 错误响应
         CONTINUE,              // 继续响应
-        PUT_METADATA
+        PUT_INDEX_META_DATA,    // 存META数据
+        PUT_REDIS_DATA,        // 存redis里的数据
     }
 
     public SimpleRSocketServer() {
@@ -84,7 +86,7 @@ public class SimpleRSocketServer extends AbstractRSocket {
                     return handleDeleteObject(payload);
                 case GET_OBJECT:
                     return handleGetObject(payload);
-                case PUT_METADATA:
+                case PUT_INDEX_META_DATA:
                     return handlePutMetadata(payload);
                 default:
                     return Mono.just(DefaultPayload.create("Unsupported operation", PayloadMetaType.ERROR.name()));
@@ -102,7 +104,7 @@ public class SimpleRSocketServer extends AbstractRSocket {
     public Flux<Payload> requestChannel(Publisher<Payload> payloads) {
         UnicastProcessor<Payload> requestFlux = UnicastProcessor.create(Queues.<Payload>unboundedMultiproducer().get());
         UnicastProcessor<Payload> responseFlux = UnicastProcessor.create(Queues.<Payload>unboundedMultiproducer().get());
-        AioUploadServerHandler uploadServerHandler = new AioUploadServerHandler(responseFlux);
+        RequestChannalHandler requestChannalHandler = new RequestChannalHandler(responseFlux);
 
         Flux.from(payloads).subscribe(payload -> {
             try {
@@ -111,29 +113,29 @@ public class SimpleRSocketServer extends AbstractRSocket {
 
 
                 switch (type) {
-                    case PUT_AND_COMPLETE_PUT_OBJECT:
-                        handleSmallFileInStream(payload, requestFlux, responseFlux);
-                        break;
+//                    case PUT_AND_COMPLETE_PUT_OBJECT:
+//                        handleSmallFileInStream(payload, requestFlux, responseFlux);
+//                        break;
                     case START_PUT_OBJECT:
-                        uploadServerHandler.handleStartUpload(payload);
+                        requestChannalHandler.handleStartUpload(payload);
                         break;
                     case PUT_OBJECT:
                         //handleDataBlock(payload, requestFlux, responseFlux);
-                        uploadServerHandler.handleDataBlock(payload);
+                        requestChannalHandler.handleDataBlock(payload);
                         break;
                     case COMPLETE_PUT_OBJECT:
                         //handleCompleteUpload(payload, requestFlux, responseFlux);
-                        uploadServerHandler.handleCompleteUpload(payload);
+                        requestChannalHandler.handleCompleteUpload(payload);
                         break;
                     case START_GET_OBJECT:
                         //handleStartDownload(payload, requestFlux, responseFlux);
-                        uploadServerHandler.handleStartDownload(payload);
+                        requestChannalHandler.handleStartDownload(payload);
                         break;
                     case GET_OBJECT_CHUNK:
-                        uploadServerHandler.handleDownloadChunk(payload);
+                        requestChannalHandler.handleDownloadChunk(payload);
                         break;
                     case COMPLETE_GET_OBJECT:
-                        uploadServerHandler.handleCompleteDownload(payload);
+                        requestChannalHandler.handleCompleteDownload(payload);
                         break;
                     default:
                         responseFlux.onNext(DefaultPayload.create("Unsupported operation", PayloadMetaType.ERROR.name()));
