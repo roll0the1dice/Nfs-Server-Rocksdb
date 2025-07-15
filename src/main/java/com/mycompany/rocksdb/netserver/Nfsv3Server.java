@@ -280,7 +280,7 @@ public class Nfsv3Server extends AbstractVerticle {
                 handleNFSACLRequest(fullMessage, netSocket);
             }
             else {
-                log.error("Unsupported program: program={}, version={}", programNumber, programVersion);
+                log.error("Unsupported program: program={}, version={}", Optional.of(programNumber), Optional.of(programVersion));
             }
 
         }
@@ -299,12 +299,12 @@ public class Nfsv3Server extends AbstractVerticle {
             int procedureNumber = rpcHeader.getProcedureNumber();
 
             log.info("NFS Request - XID: 0x{}, Program: {}, Version: {}, Procedure: {}",
-                    Integer.toHexString(xid), programNumber, programVersion, procedureNumber);
+                    (Object) Integer.toHexString(xid), Optional.of(programNumber), Optional.of(programVersion), Optional.of(procedureNumber));
 
             // Verify this is an NFS request
             if (programNumber != NFS_PROGRAM || programVersion != NFS_VERSION) {
                 log.error("Invalid NFS program number or version: program={}, version={}",
-                        programNumber, programVersion);
+                        Optional.of(programNumber), Optional.of(programVersion));
                 return;
             }
 
@@ -379,13 +379,13 @@ public class Nfsv3Server extends AbstractVerticle {
                     xdrReplyBytes = createNfsCommitReply(xid, buffer, startOffset);
                     break;
                 default:
-                    log.error("Unsupported NFS procedure: {}", procedureNumber);
+                    log.error("Unsupported NFS procedure: {}", Optional.of(procedureNumber));
                     return;
             }
 
             if (xdrReplyBytes != null) {
                 log.info("Sending NFS response - XID: 0x{}, Size: {} bytes",
-                        Integer.toHexString(xid), xdrReplyBytes.length);
+                        Optional.of(Integer.toHexString(xid)), Optional.of(xdrReplyBytes.length));
 
                 Buffer replyBuffer = Buffer.buffer(xdrReplyBytes);
 
@@ -407,7 +407,7 @@ public class Nfsv3Server extends AbstractVerticle {
             int procedureNumber = rpcHeader.getProcedureNumber();
 
             log.info("NFS_ACL Request - XID: 0x{}, Procedure: {}",
-                    Integer.toHexString(xid), procedureNumber);
+                    Optional.of(Integer.toHexString(xid)), Optional.of(procedureNumber));
 
             byte[] xdrReplyBytes = null;
             switch (procedureNumber) {
@@ -421,13 +421,13 @@ public class Nfsv3Server extends AbstractVerticle {
                     xdrReplyBytes = createNfsACLSetACLReply(xid, buffer, startOffset);
                     break;
                 default:
-                    log.error("Unsupported NFS_ACL procedure: {}", procedureNumber);
+                    log.error("Unsupported NFS_ACL procedure: {}", Optional.of(procedureNumber));
                     return;
             }
 
             if (xdrReplyBytes != null) {
                 log.info("Sending NFS_ACL response - XID: 0x{}, Size: {} bytes",
-                        Integer.toHexString(xid), xdrReplyBytes.length);
+                        Optional.of(Integer.toHexString(xid)), Optional.of(xdrReplyBytes.length));
                 netSocket.write(Buffer.buffer(xdrReplyBytes));
             }
         } catch (Exception e) {
@@ -582,8 +582,8 @@ public class Nfsv3Server extends AbstractVerticle {
         final int rpcHeaderLength = RpcConstants.RPC_ACCEPTED_REPLY_HEADER_LENGTH;
         ByteBuffer rpcHeaderBuffer = RpcUtil.createAcceptedSuccessReplyHeaderBuffer(xid);
 
-        long fileId = fileHandleToFileId.getOrDefault(new ByteArrayKeyWrapper(fhandle), 0x0000000002000002L);
-        String filename = fileIdToFileName.getOrDefault(fileId, "/");
+        long fileId = fileHandleToFileId.getOrDefault(new ByteArrayKeyWrapper(fhandle), Long.valueOf(0x0000000002000002L));
+        String filename = fileIdToFileName.getOrDefault(Optional.of(fileId), "/");
         int fileType = getFileType(filename);
 
         FAttr3 objAttributes = fileHandleToFAttr3.getOrDefault(new ByteArrayKeyWrapper(fhandle), null);
@@ -767,7 +767,7 @@ public class Nfsv3Server extends AbstractVerticle {
         String name = request.slice(startOffset + 4 + dirFhandleLength + 4,
                 startOffset + 4 + dirFhandleLength + 4 + nameLength).toString("UTF-8");
 
-        log.info("LOOKUP request - directory handle length: {}, name: {}", dirFhandleLength, name);
+        log.info("LOOKUP request - directory handle length: {}, name: {}", Optional.of(dirFhandleLength), name);
 
         // Create reply
         int rpcHeaderLength = RpcConstants.RPC_ACCEPTED_REPLY_HEADER_LENGTH;
@@ -840,7 +840,7 @@ public class Nfsv3Server extends AbstractVerticle {
         // Parse access request flags
         int accessRequest = request.getInt(startOffset + 4 + fhandleLength);
         log.info("ACCESS request - handle length: {}, access request: 0x{}",
-                fhandleLength, Integer.toHexString(accessRequest));
+                Optional.of(fhandleLength), Integer.toHexString(accessRequest));
 
         // Create reply
         int rpcHeaderLength = RpcConstants.RPC_ACCEPTED_REPLY_HEADER_LENGTH;
@@ -848,8 +848,8 @@ public class Nfsv3Server extends AbstractVerticle {
 
         // NFS ACCESS reply
         // Determine file type from handle
-        long fileId = fileHandleToFileId.getOrDefault(new ByteArrayKeyWrapper(fhandle), 0x0000000002000002L);
-        String filename = fileIdToFileName.getOrDefault(fileId, "/");
+        long fileId = fileHandleToFileId.getOrDefault(new ByteArrayKeyWrapper(fhandle), Long.valueOf(0x0000000002000002L));
+        String filename = fileIdToFileName.getOrDefault(Optional.of(fileId), "/");
         // File attributes
         int fileType =  getFileType(filename);
         // ACCESS flags
@@ -881,7 +881,7 @@ public class Nfsv3Server extends AbstractVerticle {
         accessFlags &= accessRequest;
 
         log.info("ACCESS response - file type: {}, granted access: 0x{}",
-                fileType, Integer.toHexString(accessFlags));
+                Optional.of(fileType), Integer.toHexString(accessFlags));
 
 
         FAttr3 dirAttr3 = fileHandleToFAttr3.getOrDefault(new ByteArrayKeyWrapper(fhandle), null);
@@ -968,7 +968,7 @@ public class Nfsv3Server extends AbstractVerticle {
             if (overlapStart < overlapEnd) {
                 // 构造只包含重叠部分的新 InodeData
                 Inode.InodeData part = new Inode.InodeData(cur);
-                part.offset = cur.offset + (overlapStart - curOffset);
+                part.offset = overlapStart - curOffset;
                 part.size = overlapEnd - overlapStart;
                 result.add(part);
             }
@@ -992,8 +992,8 @@ public class Nfsv3Server extends AbstractVerticle {
         final int rpcHeaderLength = RpcConstants.RPC_ACCEPTED_REPLY_HEADER_LENGTH;
         ByteBuffer rpcBodyBuffer = RpcUtil.createAcceptedSuccessReplyHeaderBuffer(xid);
 
-        long fileId = fileHandleToFileId.getOrDefault(new ByteArrayKeyWrapper(fhandle), 0x0000000002000002L);
-        String name = fileIdToFileName.getOrDefault(fileId, "/");
+        long fileId = fileHandleToFileId.getOrDefault(new ByteArrayKeyWrapper(fhandle), Long.valueOf(0x0000000002000002L));
+        String name = fileIdToFileName.getOrDefault(Optional.of(fileId), "/");
         int fileType =  getFileType(name);
         ByteArrayKeyWrapper byteArrayKeyWrapper = new ByteArrayKeyWrapper(fhandle);
         String requestId = fileHandleToRequestId.get(byteArrayKeyWrapper);
@@ -1149,18 +1149,9 @@ public class Nfsv3Server extends AbstractVerticle {
         ChunkFile chunkFile = ChunkFile.builder().nodeId(inode.getNodeId()).bucket(inode.getBucket()).objName(inode.getObjName())
                 .versionId(inode.getVersionId()).versionNum(MetaKeyUtils.getVersionNum()).size(data.size).chunkList(new ArrayList<>()).hasDeleteFiles(new LinkedList<>()).build();
 
-        String vnodeId = data.fetchInodeDataTargetVnodeId();
-        List<Long> link = Arrays.asList(((long) Long.parseLong(vnodeId)));
-        String s_uuid = "0002";
-        myRocksDB.saveRedis(vnodeId, link, s_uuid);
-
         String targetVnodeId = MetaKeyUtils.getTargetVnodeId(inode.getBucket());
-        String verisonKey = MetaKeyUtils.getVersionMetaDataKey(targetVnodeId, inode.getBucket(), inode.getObjName(), inode.getVersionId());
-        myRocksDB.saveFileMetaData(data.getFileName(), verisonKey, dataToWrite, dataToWrite.length,true);
 
-        chunkFile.getChunkList().add(data);
         list.add(chunk);
-
 
         long totalSize = 0;
         for (Inode.InodeData d : chunkFile.getChunkList()) {
@@ -1259,7 +1250,7 @@ public class Nfsv3Server extends AbstractVerticle {
                if (value == null) {
                    value = new ConcurrentSkipListMap<>();
                }
-               value.put(reqOffset, (long) dataOfLength);
+               value.put(Long.valueOf(reqOffset),  Long.valueOf(dataOfLength));
                return value;
             });
 
@@ -1275,77 +1266,41 @@ public class Nfsv3Server extends AbstractVerticle {
             inodeData.fileName = filename;
 
             List<Inode.InodeData> list = inode.getInodeData();
-            if (reqOffset == inode.getSize()) {
-//                if (reqOffset > inode.getSize()) {
-//                    if (list.isEmpty()) {
-//                        creatHole(list, Inode.InodeData.newHoleFile(reqOffset), inode);
-//                        createData(list, inodeData, inode, dataToWrite);
-//                    } else {
-//                        creatHole(list, Inode.InodeData.newHoleFile(reqOffset - inode.getSize()), inode);
-//                        createData(list, inodeData, inode, dataToWrite);
-//                    }
-//                }
-//                // 恰好追加
-//                else {
-                    appendData(list, inodeData, inode, dataToWrite);
-//                }
+
+            if (list.isEmpty()) {
+                createData(list, inodeData, inode, dataToWrite);
             }
-            // 写入位置与当前文件数据块有交集
-            else {
-                Inode.InodeData last = list.get(list.size()-1);
-                String chunkKey = ChunkFile.getChunkKeyFromChunkFileName(inode.getBucket(), last.fileName);
-                ChunkFile chunkFile = myRocksDB.getChunkFileMetaData(chunkKey).orElseThrow(() -> new RuntimeException("chunk file not found..."));
-                Inode.partialOverwrite3(chunkFile, reqOffset, inodeData);
-                //myRocksDB.saveChunkFileMetaData(chunkKey, chunkFile);
+            Inode.InodeData last = list.get(list.size()-1);
+            String chunkKey = ChunkFile.getChunkKeyFromChunkFileName(inode.getBucket(), last.fileName);
+            ChunkFile chunkFile = myRocksDB.getChunkFileMetaData(chunkKey).orElseThrow(() -> new RuntimeException("chunk file not found..."));
+            Inode.partialOverwrite3(chunkFile, reqOffset, inodeData);
 
-                String vnodeId = inodeData.fetchInodeDataTargetVnodeId();
-                List<Long> link = Arrays.asList(((long) Long.parseLong(vnodeId)));
-                String s_uuid = "0002";
-                myRocksDB.saveRedis(vnodeId, link, s_uuid);
+            String vnodeId = inodeData.fetchInodeDataTargetVnodeId();
+            List<Long> link = Arrays.asList(((long) Long.parseLong(vnodeId)));
+            String s_uuid = "0002";
+            myRocksDB.saveRedis(vnodeId, link, s_uuid);
 
-                String targetVnodeId = MetaKeyUtils.getTargetVnodeId(inode.getBucket());
-                String verisonKey = MetaKeyUtils.getVersionMetaDataKey(targetVnodeId, inode.getBucket(), inode.getObjName(), inode.getVersionId());
-                myRocksDB.saveFileMetaData(inodeData.getFileName(), verisonKey, dataToWrite, dataToWrite.length,true);
+            String targetVnodeId = MetaKeyUtils.getTargetVnodeId(inode.getBucket());
+            String verisonKey = MetaKeyUtils.getVersionMetaDataKey(targetVnodeId, inode.getBucket(), inode.getObjName(), inode.getVersionId());
+            myRocksDB.saveFileMetaData(inodeData.getFileName(), verisonKey, dataToWrite, dataToWrite.length,true);
 
-                long totalSize = 0;
-                int chunkNum = 0;
-                for (Inode.InodeData d : chunkFile.getChunkList()) {
-                    totalSize += d.getSize();
-                    if (!inode.getInodeData().contains(d)) {
-                        //Inode.InodeData newchunk = ChunkFile.newChunk(inodeData.fileName, inodeData, inode);
-                        //inode.getInodeData().add(newchunk);
-                        chunkNum++;
-                    }
-                    //chunkNum++;
+            long totalSize = 0;
+            int chunkNum = 0;
+            for (Inode.InodeData d : chunkFile.getChunkList()) {
+                totalSize += d.getSize();
+                if (!inode.getInodeData().contains(d)) {
+                    chunkNum++;
                 }
 
-
-//                totalSize = 0;
-//                for (Inode.InodeData d : inode.getInodeData()) {
-//                    totalSize += d.getSize();
-//                    //chunkNum++;
-//                }
-                inode.setSize(totalSize);
-                chunkFile.setSize(totalSize);
-                Inode.InodeData pivot = inode.getInodeData().get(0);
-                pivot.setChunkNum(chunkNum);
-                pivot.setSize(totalSize);
-
-                myRocksDB.saveINodeMetaData(targetVnodeId, inode);
-                myRocksDB.saveChunkFileMetaData(chunkKey, chunkFile);
             }
-            //myRocksDB.saveMetaData(targetVnodeId, bucket, object, filename, dataOfLength, "text/plain", false);
-            //long fileOffset = myRocksDB.saveFileData(filename, versionKey, dataOfLength, data, false);
-//            Path path = Paths.get("/mgt/"+filename);
-//            if (!path.toFile().exists()) {
-//                Files.createFile(path);
-//            }
-//            try (FileChannel channel = FileChannel.open(path, StandardOpenOption.WRITE)) {
-//                ByteBuffer byteBuffer = ByteBuffer.wrap(data);
-//                channel.write(byteBuffer, offset);
-//            } catch (IOException e) {
-//                throw new RuntimeException(e);
-//            }
+            inode.setSize(totalSize);
+            chunkFile.setSize(totalSize);
+            Inode.InodeData pivot = inode.getInodeData().get(0);
+            pivot.setChunkNum(chunkNum);
+            pivot.setSize(totalSize);
+
+            myRocksDB.saveINodeMetaData(targetVnodeId, inode);
+            myRocksDB.saveChunkFileMetaData(chunkKey, chunkFile);
 
             FAttr3 attritbutes = fileHandleToFAttr3.computeIfPresent(byteArrayKeyWrapper, (key, value) -> {
                 synchronized (value) {
@@ -1409,7 +1364,7 @@ public class Nfsv3Server extends AbstractVerticle {
     private long getFileId(String name) {
         if(!fileNameTofileId.containsKey(name)) {
             long fileId = generateFileId(name);
-            fileNameTofileId.put(name, fileId);
+            fileNameTofileId.put(name, Long.valueOf(fileId));
         }
 
         long fileId = fileNameTofileId.get(name);
@@ -1498,10 +1453,10 @@ public class Nfsv3Server extends AbstractVerticle {
         create3res.serialize(rpcNfsBuffer);
 
         // 哈希表暂时保存数据
-        fileHandleToFileId.put(new ByteArrayKeyWrapper(fileHandle), fileId);
+        fileHandleToFileId.put(new ByteArrayKeyWrapper(fileHandle), Long.valueOf(fileId));
         fileHandleToFileName.put(new ByteArrayKeyWrapper(fileHandle), name);
-        fileIdToFileName.put(fileId, name);
-        fileIdToFAttr3.put(fileId, attributes);
+        fileIdToFileName.put(Long.valueOf(fileId), name);
+        fileIdToFAttr3.put(Long.valueOf(fileId), attributes);
         fileHandleToFAttr3.put(new ByteArrayKeyWrapper(fileHandle), attributes);
         fileHandleToParentFileHandle.put(new ByteArrayKeyWrapper(fileHandle), new ByteArrayKeyWrapper(dirFhandle));
         fileHandleToChildrenFileHandle.compute(new ByteArrayKeyWrapper(dirFhandle), (key, value) -> {
@@ -1605,7 +1560,7 @@ public class Nfsv3Server extends AbstractVerticle {
                 expectedOffset = entry.getKey();
             }
             if (expectedOffset != entry.getKey()) {
-                log.error("expected offset is not equal to combined offset, expected offset: {}, combined offset: {}", expectedOffset, entry.getKey());
+                log.error("expected offset is not equal to combined offset, expected offset: {}, combined offset: {}", Optional.of(expectedOffset), entry.getKey());
                 return -1;
             } else {
                 expectedOffset += entry.getValue();
@@ -1618,28 +1573,28 @@ public class Nfsv3Server extends AbstractVerticle {
     private byte[] createNfsReadDirPlusReply(int xid, Buffer request, int startOffset) throws IOException {
         // Parse directory file handle from request
         int dirFhandleLength = request.getInt(startOffset);
-        log.info("Directory handle length: {}", dirFhandleLength);
+        log.info("Directory handle length: {}", Optional.of(dirFhandleLength));
         byte[] dirFhandle = request.slice(startOffset + 4, startOffset + 4 + dirFhandleLength).getBytes();
 
         // Parse cookie from request (we'll use this to determine the page)
         int cookieOffset = startOffset + 4 + dirFhandleLength;
-        log.info("Reading cookie at offset: {}, dirFhandleLength: {}", cookieOffset, dirFhandleLength);
+        log.info("Reading cookie at offset: {}, dirFhandleLength: {}", Optional.of(cookieOffset), Optional.of(dirFhandleLength));
 
         // Print raw bytes around cookie position for debugging
-        log.info("Raw bytes around cookie position:");
-        for (int i = cookieOffset - 4; i < cookieOffset + 12; i++) {
-            if (i >= 0 && i < request.length()) {
-                log.info("Byte at offset {}: 0x{}", i, String.format("%02X", request.getByte(i)));
-            }
-        }
+//        log.info("Raw bytes around cookie position:");
+//        for (int i = cookieOffset - 4; i < cookieOffset + 12; i++) {
+//            if (i >= 0 && i < request.length()) {
+//                log.info("Byte at offset {}: 0x{}", i, String.format("%02X", request.getByte(i)));
+//            }
+//        }
 
         long cookie = request.getLong(cookieOffset);
-        log.info("Received READDIRPLUS request with cookie: {}", cookie);
+        log.info("Received READDIRPLUS request with cookie: {}", Optional.of(cookie));
 
         int cookieVeriferOffset = cookieOffset + 8;
         int dircount = request.getInt(cookieVeriferOffset + 8);
         int maxcount = request.getInt(cookieVeriferOffset + 12);
-        log.info("READDIRPLUS request parameters - dircount: {} bytes, maxcount: {} bytes", dircount, maxcount);
+        log.info("READDIRPLUS request parameters - dircount: {} bytes, maxcount: {} bytes", Optional.of(dircount), Optional.of(maxcount));
 
         // Create reply
         int rpcHeaderLength = RpcConstants.RPC_ACCEPTED_REPLY_HEADER_LENGTH;
@@ -1681,7 +1636,7 @@ public class Nfsv3Server extends AbstractVerticle {
             }
 
             log.info("Entry '{}' size: {} bytes, current total: {} bytes (dircount limit: {} bytes)",
-                    entryName, entryNameLength, currentSize, dircount);
+                    (Object) entryName, Optional.of(entryNameLength), Optional.of(currentSize), Optional.of(dircount));
 
             FAttr3 nameAttr = fileHandleToFAttr3.getOrDefault(keyWrapper, null);
             Entryplus3 entryplus3 = Entryplus3.builder()
@@ -1703,7 +1658,7 @@ public class Nfsv3Server extends AbstractVerticle {
         }
 
         log.info("Will return {} entries starting from index {} (total size: {} bytes)",
-                entries.size(), 0, currentSize);
+                Optional.of(entries.size()), Optional.of(0), Optional.of(currentSize));
 
         FAttr3 dirAttr = fileHandleToFAttr3.getOrDefault(new ByteArrayKeyWrapper(dirFhandle), null);
         int entriesPresentFlag = entries.isEmpty() ? 0 : 1;
