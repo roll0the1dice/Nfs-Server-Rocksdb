@@ -13,6 +13,14 @@ public class NetTool {
     return sb.toString().trim();
   }
 
+  public static String bytesToHex2(byte[] bytes) {
+    StringBuilder sb = new StringBuilder();
+    for (byte b : bytes) {
+      sb.append(String.format("%x", b));
+    }
+    return sb.toString().trim();
+  }
+
   public static void printHexDump(Buffer buffer) {
     for (int i = 0; i < buffer.length(); i++) {
       System.out.printf("%02X ", buffer.getByte(i));

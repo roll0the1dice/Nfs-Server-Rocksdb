@@ -119,7 +119,7 @@ public class Inode {
         public long offset;
         public long size;
         public String fileName;
-        public String storage = "dataa";
+        public String storage;
         public String etag;
         public int chunkNum;
         public InodeData(InodeData inodeData) {

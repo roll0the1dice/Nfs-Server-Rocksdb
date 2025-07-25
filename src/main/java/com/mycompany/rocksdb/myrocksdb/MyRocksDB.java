@@ -5,6 +5,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonMappingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mycompany.rocksdb.FreeListSpaceManager;
+import com.mycompany.rocksdb.MD5Util;
 import com.mycompany.rocksdb.POJO.*;
 import com.mycompany.rocksdb.RocksDBInstanceWrapper;
 import com.mycompany.rocksdb.utils.MetaKeyUtils;
@@ -175,6 +176,83 @@ public class MyRocksDB
         }
     }
 
+    /**
+     * 删除 RocksDB 中所有以指定前缀开头的键值对。
+     *
+     * @param dbPath 数据库文件的路径
+     * @param prefix 要删除的键的前缀
+     * @throws RocksDBException 如果操作 RocksDB 时发生错误
+     */
+    public void deleteByPrefix(final String dbPath, final String prefix) throws RocksDBException {
+        final byte[] prefixBytes = prefix.getBytes(StandardCharsets.UTF_8);
+
+        // 使用 try-with-resources 确保资源（如数据库连接）被正确关闭
+        // setCreateIfMissing(false) 确保我们操作的是一个已存在的数据库
+        try {
+
+            RocksDBInstanceWrapper rocksDBInstanceWrapper = MyRocksDB.getRocksDB(INDEX_LUN);
+            RocksDB db = rocksDBInstanceWrapper.getRocksDB();
+
+            // 1. 扫描并收集所有匹配前缀的键
+            final List<byte[]> keysToDelete = new ArrayList<>();
+            System.out.println("Scanning for keys with prefix: '" + prefix + "'...");
+
+            try (final RocksIterator iterator = db.newIterator()) {
+                // seek() 会定位到第一个 >= prefixBytes 的键
+                for (iterator.seek(prefixBytes); iterator.isValid(); iterator.next()) {
+                    byte[] currentKey = iterator.key();
+                    // 检查当前键是否真的以此前缀开头
+                    if (startsWith(currentKey, prefixBytes)) {
+                        keysToDelete.add(currentKey);
+                    } else {
+                        // 因为键是排序的，一旦当前键不再以此前缀开头，
+                        // 后面的所有键都不会匹配，可以提前结束循环。
+                        break;
+                    }
+                }
+            }
+
+            // 2. 如果没有找到匹配的键，则直接返回
+            if (keysToDelete.isEmpty()) {
+                System.out.println("No keys found with the specified prefix. Nothing to delete.");
+                return;
+            }
+
+            System.out.printf("Found %d keys to delete. Preparing batch delete...%n", keysToDelete.size());
+
+            // 3. 使用 WriteBatch 批量删除
+            try (final WriteBatch batch = new WriteBatch();
+                 final WriteOptions writeOptions = new WriteOptions()) {
+
+                for (final byte[] key : keysToDelete) {
+                    batch.delete(key);
+                }
+                // 原子地执行所有删除操作
+                db.write(writeOptions, batch);
+            }
+
+            System.out.printf("Successfully deleted %d keys.%n", keysToDelete.size());
+
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        } // RocksDB 连接在此处自动关闭
+    }
+
+    /**
+     * 辅助方法，检查一个字节数组是否以另一个字节数组（前缀）开头。
+     */
+    private static boolean startsWith(byte[] array, byte[] prefix) {
+        if (array.length < prefix.length) {
+            return false;
+        }
+        for (int i = 0; i < prefix.length; i++) {
+            if (array[i] != prefix[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     public void init() {
         initRocksDB();
 
@@ -198,6 +276,7 @@ public class MyRocksDB
                 }
             }
 
+
         } catch (JsonMappingException e) {
             throw new RuntimeException(e);
         } catch (JsonParseException e) {
@@ -211,6 +290,11 @@ public class MyRocksDB
             manager.setHighWaterMark(maxOffset);
         }
 
+//        try {
+//            deleteByPrefix("", "(36866");
+//        } catch (Exception e) {
+//            throw new RuntimeException(e);
+//        }
     }
 
     public static void main(String[] args) throws IOException {
@@ -329,6 +413,7 @@ public long saveFileMetaData(String fileName, String verisonKey, byte[] dataToWr
     // 写入File数据
     String fileMetaKey = MetaKeyUtils.getFileMetaKey(fileName);
     long fileOffset = 0;
+    String etag = MD5Util.getMd5(dataToWrite);
     // 写入文件数据
     try {
         RocksDBInstanceWrapper rocksDBInstanceWrapper = MyRocksDB.getRocksDB(lun);
@@ -388,7 +473,7 @@ public long saveFileMetaData(String fileName, String verisonKey, byte[] dataToWr
                 throw new RuntimeException(e);
             }
 
-            fileMetadata = Optional.of(FileMetadata.builder().fileName(fileName).etag(E_TAG).size(count)
+            fileMetadata = Optional.of(FileMetadata.builder().fileName(fileName).etag(etag).size(count)
                     .metaKey(verisonKey).offset(Arrays.asList(fileOffset)).len(Arrays.asList(len)).lun(lun).build());
         }
 
@@ -539,7 +624,7 @@ public long saveFileMetaData(String fileName, String verisonKey, byte[] dataToWr
     public void saveRedis(String vnodeId, List<Long> link, String s_uuid) {
         String lun = DATA_LUN;
         // 连接到本地 Redis 6号库
-        RedisURI redisURI = RedisURI.builder().withHost("localhost")
+        RedisURI redisURI = RedisURI.builder().withHost("172.20.123.123")
                 .withPort(6379)
                 .withPassword("Gw@uUp8tBedfrWDy".toCharArray())
                 .withDatabase(6)
