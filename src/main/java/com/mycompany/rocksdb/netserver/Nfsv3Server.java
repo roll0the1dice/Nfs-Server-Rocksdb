@@ -625,6 +625,8 @@ public class Nfsv3Server extends AbstractVerticle {
         return fullResponseBuffer.array();
     }
 
+
+
     private byte[] createNfsSetAttrReply(int xid, Buffer request, int startOffset) throws IOException, IllegalAccessException {
         // Parse file handle from request
         //int fhandleLength = request.getInt(startOffset);
@@ -643,7 +645,7 @@ public class Nfsv3Server extends AbstractVerticle {
         // post_op_attr present flag (4 bytes)
         //FAttr3 attributes = fileHandleToFAttr3.get();
         ByteArrayKeyWrapper byteArrayKeyWrapper = new ByteArrayKeyWrapper(setattr3args.getObject().getFileHandle());
-        fileHandleToFAttr3.computeIfPresent(byteArrayKeyWrapper, (key, value) -> {
+        FAttr3 attributes = fileHandleToFAttr3.computeIfPresent(byteArrayKeyWrapper, (key, value) -> {
             SetAttr3 newAttributes = setattr3args.getNewAttributes();
             int modeSetIt = newAttributes.getMode().getSetIt();
             if (modeSetIt != 0) {
@@ -681,22 +683,36 @@ public class Nfsv3Server extends AbstractVerticle {
 
             return value;
         });
-        FAttr3 attributes = fileHandleToFAttr3.get(byteArrayKeyWrapper);
+        SETATTR3res setattr3res = null;
+        if (attributes != null) {
 
-        PreOpAttr before = PreOpAttr.builder().attributesFollow(0).build();
-        PostOpAttr after = PostOpAttr.builder()
-                .attributesFollow(1)
-                .attributes(attributes)
-                .build();
-        WccData objWcc = WccData.builder()
-                .before(before)
-                .after(after)
-                .build();
-        SETATTR3resok setattr3resok = SETATTR3resok.builder()
-                .objWcc(objWcc)
-                .build();
+            Inode inode = fileHandleToINode.get(byteArrayKeyWrapper);
+            List<Inode.InodeData> list = inode.getInodeData();
+            if (list.isEmpty() && inode.getSize() > 0) {
+                createHole(list, Inode.InodeData.newHoleFile(attributes.getSize()), inode);
+            }
+            //FAttr3 attributes = fileHandleToFAttr3.get(byteArrayKeyWrapper);
 
-        SETATTR3res setattr3res = SETATTR3res.createSuccess(setattr3resok);
+            PreOpAttr before = PreOpAttr.builder().attributesFollow(0).build();
+            PostOpAttr after = PostOpAttr.builder()
+                    .attributesFollow(1)
+                    .attributes(attributes)
+                    .build();
+            WccData objWcc = WccData.builder()
+                    .before(before)
+                    .after(after)
+                    .build();
+            SETATTR3resok setattr3resok = SETATTR3resok.builder()
+                    .objWcc(objWcc)
+                    .build();
+
+            setattr3res = SETATTR3res.createSuccess(setattr3resok);
+
+        } else {
+            WccData objWcc = WccData.builder().before(PreOpAttr.builder().build()).after(PostOpAttr.builder().build()).build();
+            SETATTR3resfail setattr3resfail = SETATTR3resfail.builder().objWcc(objWcc).build();
+            setattr3res = SETATTR3res.createFailure(NfsStat3.NFS3ERR_NOENT, setattr3resfail);
+        }
 
         int rpcNfsLength = setattr3res.getSerializedSize();
         ByteBuffer rpcNfsBuffer = ByteBuffer.allocate(rpcNfsLength);
@@ -1061,7 +1077,7 @@ public class Nfsv3Server extends AbstractVerticle {
                 } else {
                     PostOpAttr fileAttributes = PostOpAttr.builder().attributesFollow(0).build();
                     READ3resfail read3resfail = READ3resfail.builder().fileAttributes(fileAttributes).build();
-                    read3resOptinal = Optional.of(READ3res.createFail(NfsStat3.NFS3ERR_NOENT, read3resfail));
+                    read3resOptinal = Optional.of(READ3res.createFail(NfsStat3.NFS3ERR_IO, read3resfail));
                 }
 
             } else {
@@ -1120,32 +1136,6 @@ public class Nfsv3Server extends AbstractVerticle {
         return result;
     }
 
-    public static void creatHole(List<Inode.InodeData> list, Inode.InodeData holeFile , Inode inode) throws JsonProcessingException {
-        String holeFileName = MetaKeyUtils.getHoleFileName(inode.getBucket(), getRequestId());
-        Inode.InodeData holeChunk = ChunkFile.newChunk(holeFileName, holeFile, inode);
-        ChunkFile holeChunkFile =  ChunkFile.builder().nodeId(inode.getNodeId()).bucket(inode.getBucket()).objName(inode.getObjName())
-            .versionId(inode.getVersionId()).versionNum(MetaKeyUtils.getVersionNum()).size(holeFile.size).chunkList(new ArrayList<>()).hasDeleteFiles(new LinkedList<>()).build();
-
-        holeChunkFile.getChunkList().add(holeFile);
-        list.add(holeChunk);
-
-        long totalSize = 0;
-        for (Inode.InodeData d : inode.getInodeData()) {
-            totalSize += d.getSize();
-        }
-        inode.setSize(totalSize);
-
-        totalSize = 0;
-        for (Inode.InodeData d : holeChunkFile.getChunkList()) {
-            totalSize += d.getSize();
-        }
-        holeChunkFile.setSize(totalSize);
-
-        String targetVnodeId = MetaKeyUtils.getTargetVnodeId(inode.getBucket());
-        myRocksDB.saveINodeMetaData(targetVnodeId, inode);
-        myRocksDB.saveChunkFileMetaData(ChunkFile.getChunkKey(holeFileName), holeChunkFile);
-    }
-
     public static void createData(List<Inode.InodeData> list, Inode.InodeData data, Inode inode, byte[] dataToWrite) throws JsonProcessingException {
         // 把普通 inodeData 转换为 chunk
         String chunkKey = ChunkFile.getChunkKey(data.fileName);
@@ -1153,6 +1143,7 @@ public class Nfsv3Server extends AbstractVerticle {
         ChunkFile chunkFile = ChunkFile.builder().nodeId(inode.getNodeId()).bucket(inode.getBucket()).objName(inode.getObjName())
                 .versionId(inode.getVersionId()).versionNum(MetaKeyUtils.getVersionNum()).size(data.size).chunkList(new ArrayList<>()).hasDeleteFiles(new LinkedList<>()).build();
 
+        chunkFile.getChunkList().add(data);
         list.add(chunk);
 
         chunkFile.setSize(data.size);
@@ -1164,9 +1155,32 @@ public class Nfsv3Server extends AbstractVerticle {
         myRocksDB.saveChunkFileMetaData(chunkKey, chunkFile);
     }
 
+    public static void createHole(List<Inode.InodeData> list, Inode.InodeData holeFile, Inode inode) throws JsonProcessingException {
+        String holeFileName = MetaKeyUtils.getHoleFileName(inode.getBucket(), getRequestId());
+        String chunkKey = ChunkFile.getChunkKey(holeFileName);
+        Inode.InodeData chunk = ChunkFile.newChunk(holeFileName, holeFile, inode);
+        ChunkFile chunkFile = ChunkFile.builder().nodeId(inode.getNodeId()).bucket(inode.getBucket()).objName(inode.getObjName())
+                .versionId(inode.getVersionId()).versionNum(MetaKeyUtils.getVersionNum()).size(holeFile.size).chunkList(new ArrayList<>()).hasDeleteFiles(new LinkedList<>()).build();
+
+        chunkFile.getChunkList().add(holeFile);
+        list.add(chunk);
+
+        chunkFile.setSize(holeFile.size);
+        inode.setSize(holeFile.size);
+
+        String targetVnodeId = MetaKeyUtils.getTargetVnodeId(inode.getBucket());
+        myRocksDB.saveINodeMetaData(targetVnodeId, inode);
+        // 关联 - chunkKey - chunk - chunkFile
+        myRocksDB.saveChunkFileMetaData(chunkKey, chunkFile);
+    }
+
     public static void appendData(List<Inode.InodeData> list, Inode.InodeData data, Inode inode, byte[] dataToWrite) throws JsonProcessingException {
         if (list.isEmpty()) {
-            createData(list, data, inode, dataToWrite);
+            if (StringUtils.isBlank(data.fileName)) {
+                createHole(list ,data, inode);
+            } else {
+                createData(list, data, inode, dataToWrite);
+            }
         }
         else {
             Inode.InodeData last = list.get(list.size() - 1);
@@ -1176,10 +1190,10 @@ public class Nfsv3Server extends AbstractVerticle {
             myRocksDB.saveChunkFileMetaData(chunkKey, chunkFile);
 
             String targetVnodeId = MetaKeyUtils.getTargetVnodeId(inode.getBucket());
-            if (StringUtils.isNotBlank(data.fileName)) {
+            if (StringUtils.isNotBlank(data.fileName) && dataToWrite != null) {
                 String vnodeId = data.fetchInodeDataTargetVnodeId();
                 List<Long> link = Arrays.asList(((long) Long.parseLong(vnodeId)));
-                String s_uuid = "0002";
+                String s_uuid = "0001";
                 myRocksDB.saveRedis(vnodeId, link, s_uuid);
 
                 String verisonKey = MetaKeyUtils.getVersionMetaDataKey(targetVnodeId, inode.getBucket(), inode.getObjName(), null);
@@ -1234,14 +1248,6 @@ public class Nfsv3Server extends AbstractVerticle {
 
         if (attributes != null && object != null) {
 
-            fileHandleToOffset.compute(byteArrayKeyWrapper, (key, value) -> {
-               if (value == null) {
-                   value = new ConcurrentSkipListMap<>();
-               }
-               value.put(Long.valueOf(reqOffset),  Long.valueOf(dataOfLength));
-               return value;
-            });
-
             String bucket = BUCK_NAME;
             String filename = MetaKeyUtils.getObjFileName(bucket, object, getRequestId());
 
@@ -1257,7 +1263,7 @@ public class Nfsv3Server extends AbstractVerticle {
             // 如果写入的位置大于文件的末端
             if (reqOffset >= inode.getSize()) {
                 if (reqOffset > inode.getSize()) {
-                    appendData(list, Inode.InodeData.newHoleFile(reqOffset - inodeData.getSize()), inode, dataToWrite);
+                    appendData(list, Inode.InodeData.newHoleFile(reqOffset - inode.getSize()), inode, dataToWrite);
                     appendData(list, inodeData, inode, dataToWrite);
                 }
                 // 恰好追加
@@ -1270,31 +1276,21 @@ public class Nfsv3Server extends AbstractVerticle {
                 Inode.InodeData last = list.get(list.size() - 1);
                 String chunkKey = ChunkFile.getChunkKeyFromChunkFileName(inode.getBucket(), last.fileName);
                 ChunkFile chunkFile = myRocksDB.getChunkFileMetaData(chunkKey).orElseThrow(() -> new RuntimeException("chunk file not found..."));
-                Inode.partialOverwrite3(chunkFile, reqOffset, inodeData);
+                long updatedtotalSize = Inode.partialOverwrite3(chunkFile, reqOffset, inodeData);
 
                 String vnodeId = inodeData.fetchInodeDataTargetVnodeId();
                 List<Long> link = Arrays.asList(((long) Long.parseLong(vnodeId)));
-                String s_uuid = "0002";
+                String s_uuid = "0001";
                 myRocksDB.saveRedis(vnodeId, link, s_uuid);
 
                 String targetVnodeId = MetaKeyUtils.getTargetVnodeId(inode.getBucket());
                 String verisonKey = MetaKeyUtils.getVersionMetaDataKey(targetVnodeId, inode.getBucket(), inode.getObjName(), inode.getVersionId());
                 myRocksDB.saveFileMetaData(inodeData.getFileName(), verisonKey, dataToWrite, dataToWrite.length, true);
 
-                long totalSize = 0;
-                int chunkNum = 0;
-                for (Inode.InodeData d : chunkFile.getChunkList()) {
-                    totalSize += d.getSize();
-                    if (!inode.getInodeData().contains(d)) {
-                        chunkNum++;
-                    }
-
-                }
-
-                chunkFile.setSize(totalSize);
-                inode.setSize(totalSize);
-                last.setChunkNum(chunkNum);
-                last.setSize(totalSize);
+                chunkFile.setSize(chunkFile.getSize() + updatedtotalSize);
+                inode.setSize(chunkFile.getSize() + updatedtotalSize);
+                last.setChunkNum(chunkFile.getChunkList().size());
+                last.setSize(chunkFile.getSize() + updatedtotalSize);
 
                 myRocksDB.saveINodeMetaData(targetVnodeId, inode);
                 myRocksDB.saveChunkFileMetaData(chunkKey, chunkFile);
@@ -1479,7 +1475,7 @@ public class Nfsv3Server extends AbstractVerticle {
 
             String vnodeId = MetaKeyUtils.getObjectVnodeId(bucket, object);
             List<Long> link = Arrays.asList(((long) Long.parseLong(vnodeId)));
-            String s_uuid = "0002";
+            String s_uuid = "0001";
             myRocksDB.saveRedis(vnodeId, link, s_uuid);
 
         }catch (Exception e) {

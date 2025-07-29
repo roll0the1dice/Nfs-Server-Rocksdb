@@ -313,12 +313,14 @@ public class Inode {
 
     }
 
-    public static void partialOverwrite3(ChunkFile chunkFile, long coverOffset, Inode.InodeData updatedData) {
+    public static long partialOverwrite3(ChunkFile chunkFile, long coverOffset, Inode.InodeData updatedData) {
         long totalOffset = 0;
         ListIterator<Inode.InodeData> it = chunkFile.chunkList.listIterator();
         boolean dataAdded = false;
 
         long curOffset = 0L;
+
+        long totalOverwrittenSize = 0;
 
         while (it.hasNext()) {
             Inode.InodeData cur = it.next();
@@ -326,6 +328,14 @@ public class Inode {
             totalOffset += cur.size;
 
             long curEnd = curOffset + cur.size;
+            long coverEnd = coverOffset + updatedData.size;
+
+            long overlapStart = Math.max(curOffset, coverOffset);
+            long overlapEnd = Math.min(curEnd, coverEnd);
+
+            if (overlapEnd > overlapStart) {
+                totalOverwrittenSize += (overlapEnd - overlapStart);
+            }
 
             // Case 1: Current chunk is completely to the left of the overwrite area.
             if (curEnd <= coverOffset) {
@@ -334,7 +344,7 @@ public class Inode {
             }
 
             // Case 2: Current chunk is completely to the right of the overwrite area.
-            long coverEnd = coverOffset + updatedData.size;
+
             if (curOffset >= coverEnd) {
                 // The overwrite area is in a gap before this chunk.
                 // Go back and insert.
@@ -412,14 +422,7 @@ public class Inode {
             curOffset = curEnd;
         }
 
-        if (!dataAdded) {
-            if (curOffset < coverOffset) {
-                long newSize = coverOffset - curOffset;
-                chunkFile.chunkList.add(new InodeData(0, newSize, "", "", "", 0));
-            }
-            updatedData.offset = 0;
-            chunkFile.chunkList.add(updatedData);
-        }
+        return totalOverwrittenSize;
     }
 
     public static void partialOverwrite2(ChunkFile chunkFile, long coverOffset, Inode.InodeData updatedData) {
