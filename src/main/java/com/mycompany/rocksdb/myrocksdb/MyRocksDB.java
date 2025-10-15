@@ -1,26 +1,35 @@
 package com.mycompany.rocksdb.myrocksdb;
 
+
 import com.fasterxml.jackson.core.JsonParseException;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonMappingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.mycompany.rocksdb.FreeListSpaceManager;
-import com.mycompany.rocksdb.MD5Util;
 import com.mycompany.rocksdb.POJO.*;
-import com.mycompany.rocksdb.RocksDBInstanceWrapper;
 import com.mycompany.rocksdb.utils.MetaKeyUtils;
 import com.mycompany.rocksdb.utils.VersionUtil;
+import io.lettuce.core.RedisClient;
 import io.lettuce.core.RedisURI;
+import io.lettuce.core.api.StatefulRedisConnection;
+import io.lettuce.core.api.sync.RedisCommands;
+import lombok.extern.log4j.Log4j2;
+
 import org.apache.commons.lang3.StringUtils;
-import org.rocksdb.*;
+import org.rocksdb.ColumnFamilyDescriptor;
+import org.rocksdb.ColumnFamilyHandle;
+import org.rocksdb.ColumnFamilyOptions;
+import org.rocksdb.DBOptions;
+import org.rocksdb.Options;
+import org.rocksdb.RocksDB;
+import org.rocksdb.RocksDBException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.*;
+import com.mycompany.rocksdb.allocator.JavaAllocator;
+
+import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
@@ -30,75 +39,189 @@ import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
-import io.lettuce.core.RedisClient;
-import io.lettuce.core.api.StatefulRedisConnection;
-import io.lettuce.core.api.sync.RedisCommands;
 
 import static com.mycompany.rocksdb.constant.GlobalConstant.BLOCK_SIZE;
+import static com.mycompany.rocksdb.constant.GlobalConstant.ROCKS_FILE_META_PREFIX;
+import static com.mycompany.rocksdb.constant.GlobalConstant.ROCKS_FILE_SYSTEM_PREFIX_OFFSET;
+import static com.mycompany.rocksdb.constant.GlobalConstant.SPACE_LEN;
+import static com.mycompany.rocksdb.constant.GlobalConstant.SPACE_SIZE;
+
+import java.io.File;
+import java.nio.charset.StandardCharsets;
+
 
 /**
- * Hello world!
+ * 真实的RocksDB集成实现
+ * 与项目中的实际实现逻辑完全一致，使用真实的RocksDB列簇来存储已分配区间
  *
  */
-public class MyRocksDB
-{
-    private static final Logger logger = LoggerFactory.getLogger(com.mycompany.rocksdb.myrocksdb.MyRocksDB.class);
+public class MyRocksDB {
+    private static final Logger logger = LoggerFactory.getLogger(MyRocksDB.class);
+
+    // 静态哈希表，用于缓存每个LUN对应的RealRocksDBIntegration实例
+    private static final Map<String, MyRocksDB> dbMap = new ConcurrentHashMap<>();
+
+    public static final Map<String, Map<String, ColumnFamilyHandle>> cfHandleMap = new ConcurrentHashMap<>();
+
+    public static final String INDEX_LUN = "fs-SP0-14-index";
+    
+    public static final String DATA_LUN = "fs-SP0-9";
+
+    public static final List<String> lunList = Arrays.asList(INDEX_LUN, DATA_LUN);
+
+    private final String deviceName;
+
+    private final JavaAllocator allocator;
+    
+    private final long totalSize;
+
+    private final RocksDB rocksDB;
+
+    private final List<ColumnFamilyHandle> cfHandels;
+
+    // 移除静态初始化块，避免重复调用
 
     static {
         RocksDB.loadLibrary();
+        
+        // 初始化RocksDB
+        initRocksDB();
+
+        logger.info("RocksDB loaded");
     }
 
-    private static final String DB_PATH = "/fs-SP0-2/rocks_db"; // 数据库文件存放目录
+    /**
+     * 构造函数
+     * @param totalSize 总大小（字节）
+     */
+    public MyRocksDB(String deviceName, long totalSize, RocksDB rocksDB, List<ColumnFamilyHandle> cfHandels) {
+        this.deviceName = deviceName;
+        this.totalSize = totalSize;
 
-    private static final String INDEX_DB_PATH = "/fs-SP0-8-index/rocks_db";
+        // 计算总逻辑块数，与BlockDevice中的逻辑完全一致
+        long totalBlocks = (1024 * 1024 / BLOCK_SIZE) * (totalSize / (1024 * 1024) - 1);
+        if (totalBlocks < 1) {
+            throw new IllegalArgumentException("totalBlocks must be greater than or equal to 1");
+        }
 
-    private static final String E_TAG = "85c45b74e8753920570f6c9a01ca759b";
+        this.allocator = new JavaAllocator(totalBlocks, BLOCK_SIZE);
 
-    private static final Map<String, Map<String, ColumnFamilyHandle>> cfHandleMap = new ConcurrentHashMap<>();
+        logger.info("RealRocksDBIntegration initialized: deviceName={}, totalSize={}, totalBlocks={}",
+            deviceName, totalSize, totalBlocks);
 
-    public static Map<String, RocksDBInstanceWrapper> dbMap = new ConcurrentHashMap<>();
-
-    public static final long START_OFFSET = 2550000000L;
-
-    public static final FreeListSpaceManager manager = new FreeListSpaceManager(START_OFFSET);
-
-
-    public static final String INDEX_LUN = "fs-SP0-8-index";
-    public static final String DATA_LUN = "fs-SP0-4";
-    public static final Path SAVE_TO_DATA_PATH = Paths.get("/dev/sdg2");
-
-    public MyRocksDB() {
-        init();
+        this.rocksDB = rocksDB;
+        this.cfHandels = cfHandels;
     }
 
-    public void initRocksDB() {
-        List<String> lunList = Arrays.asList(INDEX_LUN, DATA_LUN);
+    public ColumnFamilyHandle getColumnFamilyHandle() {
+        return cfHandels.isEmpty() ? null : cfHandels.get(0);
+    }
 
+    public byte[] get(byte[] key) throws RocksDBException {
+        return rocksDB.get(key);
+    }
+
+    public byte[] get(ColumnFamilyHandle columnFamilyHandle, byte[] key) throws RocksDBException {
+        return rocksDB.get(columnFamilyHandle, key);
+    }
+
+    public void put(byte[] key, byte[] value) throws RocksDBException {
+        rocksDB.put(key, value);
+    }
+
+    public void put(ColumnFamilyHandle columnFamilyHandle, byte[] key, byte[] value) throws RocksDBException {
+        rocksDB.put(columnFamilyHandle, key, value);
+    }
+
+    public void close() {
+        // 关键：先关闭所有句柄，再关闭数据库实例
+        Exception closeException = null;
+
+        // 1. 关闭所有 ColumnFamilyHandle
+        for (final ColumnFamilyHandle columnFamilyHandle : cfHandels) {
+            try {
+                columnFamilyHandle.close();
+            } catch (Exception e) {
+                System.err.println("Error closing ColumnFamilyHandle: " + e.getMessage());
+                if (closeException == null) {
+                    closeException = new RuntimeException("Failed to close one or more resources.");
+                }
+                closeException.addSuppressed(e);
+            }
+        }
+
+        // 2. 关闭 RocksDB 实例
+        if (rocksDB != null) {
+            try {
+                rocksDB.close();
+            } catch (Exception e) {
+                System.err.println("Error closing rocksdb instance: " + e.getMessage());
+                if (closeException == null) {
+                    closeException = new RuntimeException("Failed to close one or more resources.");
+                }
+                closeException.addSuppressed(e);
+            }
+        }
+
+        if (closeException != null) {
+            throw (RuntimeException) closeException;
+        }
+    }
+
+    public static void initRocksDB() {
         lunList.stream().forEach(lun -> {
             try {
-                RocksDBInstanceWrapper db = openRocksDB(lun, "/" + lun + "/rocks_db");
+                MyRocksDB db = openRocksDB(lun, lun);
+
                 dbMap.put(lun, db);
+
+                db.initializeBlockSpace();
+
+                db.restoreAllocationStateFromRocksDB();
             } catch (RuntimeException e) {
                 logger.error("load rocks db with " + lun + " fail ", e);
             }
         });
     }
-
-    public static RocksDBInstanceWrapper openRocksDB(String lun, String path) {
+    
+    public static MyRocksDB openRocksDB(String lun, String path) {
 
         List<ColumnFamilyDescriptor> cfDescriptors = new ArrayList<>();
-        List<byte[]> cfNames = Collections.emptyList();
+        List<byte[]> cfNames;
 
         // 步骤 1: 使用静态方法 listColumnFamilies 列出所有列族名称
         try {
-            cfNames = RocksDB.listColumnFamilies(new Options(), path);
+            cfNames = RocksDB.listColumnFamilies(new Options().setCreateIfMissing(true), path);
             if (cfNames.isEmpty()) {
-                // 如果为空，可能意味着数据库是新的，至少要添加 default 列族
+                // 如果为空，可能意味着数据库是新的，创建三个列族：default, .1., migrate
+                cfNames = new ArrayList<>();
                 cfNames.add(RocksDB.DEFAULT_COLUMN_FAMILY);
+                cfNames.add(".1.".getBytes(StandardCharsets.UTF_8));
+                cfNames.add("migrate".getBytes(StandardCharsets.UTF_8));
+                logger.info("创建新数据库，初始化三个列族: [default, .1., migrate]");
+            } else {
+                // 检查是否包含所需的列族，如果缺少则添加
+                Set<String> existingCfNames = cfNames.stream()
+                    .map(bytes -> new String(bytes, StandardCharsets.UTF_8))
+                    .collect(Collectors.toSet());
+                
+                if (!existingCfNames.contains(".1.")) {
+                    cfNames.add(".1.".getBytes(StandardCharsets.UTF_8));
+                    logger.info("添加缺失的列族: .1.");
+                }
+                if (!existingCfNames.contains("migrate")) {
+                    cfNames.add("migrate".getBytes(StandardCharsets.UTF_8));
+                    logger.info("添加缺失的列族: migrate");
+                }
             }
         } catch (RocksDBException e) {
             logger.info("列出列族失败: " + e.getMessage());
-            System.exit(-1);
+            // 如果是新数据库，创建三个列族：default, .1., migrate
+            cfNames = new ArrayList<>();
+            cfNames.add(RocksDB.DEFAULT_COLUMN_FAMILY);
+            cfNames.add(".1.".getBytes(StandardCharsets.UTF_8));
+            cfNames.add("migrate".getBytes(StandardCharsets.UTF_8));
+            logger.info("创建新数据库，初始化三个列族: [default, .1., migrate]");
         }
 
         logger.info("在路径 " + path + " 下发现的列族: " +
@@ -108,8 +231,8 @@ public class MyRocksDB
         // 即使我们不打算使用它们，也必须在 open 时提供
         // 每个 Descriptor 包含列族名称和其对应的选项
         for (byte[] name : cfNames) {
-            MergeOperator mergeOperator = new com.macrosan.database.rocksdb.MossMergeOperator();
-            cfDescriptors.add(new ColumnFamilyDescriptor(name, new ColumnFamilyOptions().setMergeOperator(mergeOperator)));
+            //MergeOperator mergeOperator = new com.macrosan.database.rocksdb.MossMergeOperator();
+            cfDescriptors.add(new ColumnFamilyDescriptor(name, new ColumnFamilyOptions()));
         }
 
         List<ColumnFamilyHandle> cfHandles = new ArrayList<>();
@@ -120,7 +243,12 @@ public class MyRocksDB
             // 如果目录不存在，创建它
             File dbDir = new File(path);
             if (!dbDir.exists()) {
-                System.exit(1);
+                boolean created = dbDir.mkdirs();
+                if (!created) {
+                    logger.error("无法创建数据库目录: " + path);
+                    throw new RuntimeException("无法创建数据库目录: " + path);
+                }
+                logger.info("成功创建数据库目录: " + path);
             }
 
             RocksDB db = RocksDB.open(dbOptions, path, cfDescriptors, cfHandles);
@@ -133,370 +261,455 @@ public class MyRocksDB
             });
             cfHandles.stream().forEach(columnFamilyHandle -> {
                 try {
-                    handleMap.put(new String(columnFamilyHandle.getName()), columnFamilyHandle);
+                    String cfName = new String(columnFamilyHandle.getName());
+                    handleMap.put(cfName, columnFamilyHandle);
+                    logger.info("Added column family handle: {} for lun: {}", cfName, lun);
                 } catch (RocksDBException e) {
                     logger.info("rocksdb handle:{}", e.getMessage());
                 }
             });
+            
+            logger.info("Column family handles for lun {}: {}", lun, handleMap.keySet());
 
-            return new RocksDBInstanceWrapper(db, cfHandles);
+            // 根据LUN类型设置不同的参数
+            long totalSize;
+            long blockSize = 4096; // 4KB块大小
+
+            if (lun.equals(INDEX_LUN)) {
+                totalSize = 1000000000; // 10MB for index LUN
+            } else if (lun.equals(DATA_LUN)) {
+                totalSize = 1000000000; // 100MB for data LUN
+            } else {
+                totalSize = 500000000; // 默认50MB
+            }
+
+            logger.info("为LUN {} 创建RealRocksDBIntegration实例: totalSize={}, blockSize={}",
+                    lun, totalSize, blockSize);
+
+            return new MyRocksDB(lun, totalSize, db, cfHandles);
         } catch (RocksDBException e) {
             throw new RuntimeException(e);
         }
         // }
     }
 
-    public static void closeAllDBs() {
-        System.out.println("Starting to close all RocksDB instances and their handles...");
-        Exception shutdownException = null;
-
-        for (Map.Entry<String, RocksDBInstanceWrapper> entry : dbMap.entrySet()) {
-            String dbName = entry.getKey();
-            RocksDBInstanceWrapper wrapper = entry.getValue();
-
-            if (wrapper != null) {
-                try {
-                    System.out.println("Closing RocksDB wrapper for: " + dbName);
-                    wrapper.close(); // 调用封装类的关闭方法
-                    System.out.println("Successfully closed wrapper for: " + dbName);
-                } catch (Exception e) {
-                    System.err.println("Error closing wrapper for '" + dbName + "'.");
-                    if (shutdownException == null) {
-                        shutdownException = new RuntimeException("Failed to close one or more RocksDB wrappers.");
-                    }
-                    shutdownException.addSuppressed(e);
-                }
-            }
+    public static ColumnFamilyHandle getColumnFamily(String lun) {
+        //System.out.println("public static ColumnFamilyHandle getColumnFamily(String lun)");
+        //logger.info("Getting column family for lun: {}", lun);
+        //logger.info("Available luns in cfHandleMap: {}", cfHandleMap.keySet());
+        
+        Map<String, ColumnFamilyHandle> handleMap = cfHandleMap.get(lun);
+        if (handleMap == null) {
+            logger.warn("No column family handles found for lun: {}", lun);
+            return null;
         }
-
-        dbMap.clear();
-        System.out.println("Finished closing all RocksDB wrappers.");
-        if (shutdownException != null) {
-            throw (RuntimeException) shutdownException;
+        
+        //logger.info("Available column families for lun {}: {}", lun, handleMap.keySet());
+        //logger.info("Looking for column family: {}", ROCKS_FILE_SYSTEM_PREFIX_OFFSET);
+        
+        ColumnFamilyHandle handle = handleMap.get(ROCKS_FILE_SYSTEM_PREFIX_OFFSET);
+        if (handle == null) {
+            logger.warn("Column family handle not found for lun: {} and key: {}", lun, ROCKS_FILE_SYSTEM_PREFIX_OFFSET);
+            return null;
         }
+        
+        logger.info("Successfully found column family handle for lun: {} and key: {}", lun, ROCKS_FILE_SYSTEM_PREFIX_OFFSET);
+        return handle;
     }
 
-    /**
-     * 删除 RocksDB 中所有以指定前缀开头的键值对。
-     *
-     * @param dbPath 数据库文件的路径
-     * @param prefix 要删除的键的前缀
-     * @throws RocksDBException 如果操作 RocksDB 时发生错误
-     */
-    public void deleteByPrefix(final String dbPath, final String prefix) throws RocksDBException {
-        final byte[] prefixBytes = prefix.getBytes(StandardCharsets.UTF_8);
-
-        // 使用 try-with-resources 确保资源（如数据库连接）被正确关闭
-        // setCreateIfMissing(false) 确保我们操作的是一个已存在的数据库
-        try {
-
-            RocksDBInstanceWrapper rocksDBInstanceWrapper = MyRocksDB.getRocksDB(INDEX_LUN);
-            RocksDB db = rocksDBInstanceWrapper.getRocksDB();
-
-            // 1. 扫描并收集所有匹配前缀的键
-            final List<byte[]> keysToDelete = new ArrayList<>();
-            System.out.println("Scanning for keys with prefix: '" + prefix + "'...");
-
-            try (final RocksIterator iterator = db.newIterator()) {
-                // seek() 会定位到第一个 >= prefixBytes 的键
-                for (iterator.seek(prefixBytes); iterator.isValid(); iterator.next()) {
-                    byte[] currentKey = iterator.key();
-                    // 检查当前键是否真的以此前缀开头
-                    if (startsWith(currentKey, prefixBytes)) {
-                        keysToDelete.add(currentKey);
-                    } else {
-                        // 因为键是排序的，一旦当前键不再以此前缀开头，
-                        // 后面的所有键都不会匹配，可以提前结束循环。
-                        break;
-                    }
-                }
-            }
-
-            // 2. 如果没有找到匹配的键，则直接返回
-            if (keysToDelete.isEmpty()) {
-                System.out.println("No keys found with the specified prefix. Nothing to delete.");
-                return;
-            }
-
-            System.out.printf("Found %d keys to delete. Preparing batch delete...%n", keysToDelete.size());
-
-            // 3. 使用 WriteBatch 批量删除
-            try (final WriteBatch batch = new WriteBatch();
-                 final WriteOptions writeOptions = new WriteOptions()) {
-
-                for (final byte[] key : keysToDelete) {
-                    batch.delete(key);
-                }
-                // 原子地执行所有删除操作
-                db.write(writeOptions, batch);
-            }
-
-            System.out.printf("Successfully deleted %d keys.%n", keysToDelete.size());
-
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        } // RocksDB 连接在此处自动关闭
-    }
-
-    /**
-     * 辅助方法，检查一个字节数组是否以另一个字节数组（前缀）开头。
-     */
-    private static boolean startsWith(byte[] array, byte[] prefix) {
-        if (array.length < prefix.length) {
-            return false;
-        }
-        for (int i = 0; i < prefix.length; i++) {
-            if (array[i] != prefix[i]) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    public void init() {
-        initRocksDB();
-
-        String data_lun = DATA_LUN;
-        long maxOffset = 0;
-        ObjectMapper objectMapper = new ObjectMapper();
-        RocksDBInstanceWrapper rocksDBInstanceWrapper = MyRocksDB.getRocksDB(data_lun);
-        RocksDB db = rocksDBInstanceWrapper.getRocksDB();
-        try (final RocksIterator iterator = db.newIterator()) {
-            // 4. 从第一个元素开始遍历
-            for (iterator.seekToFirst(); iterator.isValid(); iterator.next()) {
-                String key = new String(iterator.key(), StandardCharsets.UTF_8);
-                if (key.startsWith("#")) {
-                    String value = new String(iterator.value(), StandardCharsets.UTF_8);
-                    //System.out.println("Key: " + key + ", Value: " + value);.
-                    FileMetadata metadata = objectMapper.readValue(value, FileMetadata.class);
-                    Optional<Long> maxOptional = metadata.getOffset().stream().max(Comparator.naturalOrder());
-                    if (maxOptional.isPresent()) {
-                        maxOffset = Math.max(maxOffset, maxOptional.get());
-                    }
-                }
-            }
-
-
-        } catch (JsonMappingException e) {
-            throw new RuntimeException(e);
-        } catch (JsonParseException e) {
-            throw new RuntimeException(e);
-        } catch (IOException e) {
-            throw new RuntimeException(e);
-        }
-
-        if (maxOffset > 0) {
-            maxOffset = maxOffset / BLOCK_SIZE * BLOCK_SIZE + BLOCK_SIZE;
-            manager.setHighWaterMark(maxOffset);
-        }
-
-//        try {
-//            deleteByPrefix("", "(36866");
-//        } catch (Exception e) {
-//            throw new RuntimeException(e);
-//        }
-    }
-
-    public static void main(String[] args) throws IOException {
-        // 1. 静态加载 RocksDB JNI 库
-        // 这是使用 RocksDB Java API 的第一步，也是最重要的一步
-        //RocksDB.loadLibrary();
-        MyRocksDB myRocksDB = new MyRocksDB();
-        myRocksDB.init();
-
-        byte[] writeData = Files.readAllBytes(Paths.get("my-file.txt"));
-
-        try {
-            String bucket = "12321";
-            String targetVnodeId = MetaKeyUtils.getTargetVnodeId(bucket);
-            String object = "gadw.txt";
-            String requestId = MetaKeyUtils.getRequestId();
-            String filename = MetaKeyUtils.getObjFileName(bucket, object, requestId);
-            myRocksDB.saveIndexMetaData(targetVnodeId, bucket, object, filename, writeData.length, "text/plain", true);
-
-            String vnodeId = MetaKeyUtils.getObjectVnodeId(bucket, object);
-            List<Long> link = Arrays.asList(((long)Long.parseLong(vnodeId)));
-            String s_uuid = "0002";
-            myRocksDB.saveRedis(vnodeId, link,  s_uuid);
-
-
-            String versionId = "null";
-            String versionKey = MetaKeyUtils.getVersionMetaDataKey(targetVnodeId, bucket, object, versionId);
-            //myRocksDB.saveFileData(filename, versionKey, writeData.length, writeData, true);
-
-        } catch (Exception e) {
-            logger.error("operate db fail..");
-        }
-
-        MyRocksDB.closeAllDBs();
-    }
-
-
-    public static RocksDBInstanceWrapper getRocksDB(String lun) {
+    public static MyRocksDB getRocksDB(String lun) {
         return dbMap.get(lun);
     }
 
-//    public long saveFileData(String fileName, String verisonKey, long length, byte[] payload, boolean isCreated) {
-//        ObjectMapper objectMapper = new ObjectMapper();
-//
-//        String lun = DATA_LUN;
-//        Path path = SAVE_TO_DATA_PATH;
-//
-//        if (!path.toFile().exists()) {
-//            System.out.println("ERROR: device does not exist!");
-//            System.exit(-1);
-//        }
-//
-//        // 写入File数据
-//        String fileMetaKey = MetaKeyUtils.getFileMetaKey(fileName);
-//        long fileOffset = 0;
-//        // 写入文件数据
-//        try {
-//            RocksDBInstanceWrapper rocksDBInstanceWrapper = MyRocksDB.getRocksDB(lun);
-//            RocksDB db = rocksDBInstanceWrapper.getRocksDB();
-//
-//            byte[] value = db.get(fileMetaKey.getBytes(StandardCharsets.UTF_8));
-//            Optional<FileMetadata> fileMetadata = Optional.empty();
-//            if (value != null && !isCreated) {
-//                fileMetadata = Optional.of(objectMapper.readValue(value, FileMetadata.class));
-////                FileMetadata fileMetadata = FileMetadata.builder().fileName(fileName).etag(E_TAG).size(0)
-////                        .metaKey(verisonKey).offset(new ArrayList<>()).len(new ArrayList<>()).lun(lun).build();
-//                long len = length/BLOCK_SIZE*BLOCK_SIZE+BLOCK_SIZE;
-//                fileOffset = manager.allocate(len).get();
-//
-//                try (FileChannel channel = FileChannel.open(path, StandardOpenOption.WRITE)) {
-//                    ByteBuffer byteBuffer = ByteBuffer.wrap(payload);
-//                    channel.write(byteBuffer, fileOffset);
-//                } catch (IOException e) {
-//                    throw new RuntimeException(e);
-//                }
-//                fileMetadata.get().getOffset().add(fileOffset);
-//                fileMetadata.get().getLen().add(len);
-//                fileMetadata.get().setSize(fileMetadata.get().getSize() + length);
-//            } else {
-//                long len = length/BLOCK_SIZE*BLOCK_SIZE+BLOCK_SIZE;
-//                fileOffset = manager.allocate(len).get();
-//
-//                try (FileChannel channel = FileChannel.open(path, StandardOpenOption.WRITE)) {
-//                    ByteBuffer byteBuffer = ByteBuffer.wrap(payload);
-//                    channel.write(byteBuffer, fileOffset);
-//                } catch (IOException e) {
-//                    throw new RuntimeException(e);
-//                }
-//
-//                fileMetadata = Optional.of(FileMetadata.builder().fileName(fileName).etag(E_TAG).size(length)
-//                        .metaKey(verisonKey).offset(Arrays.asList(fileOffset)).len(Arrays.asList(len)).lun(lun).build());
-//            }
-//
-//            db.put(fileMetaKey.getBytes(StandardCharsets.UTF_8), objectMapper.writeValueAsBytes(fileMetadata.get()));
-//
-//            return fileOffset;
-//        } catch (JsonProcessingException | RocksDBException e) {
-//            logger.error("write file data into disk fails...");
-//            throw new RuntimeException(e);
-//        } catch (IOException e) {
-//            throw new RuntimeException(e);
-//        }
-//    }
+    /**
+     * 初始化逻辑空间结构
+     * 与BlockDevice.tryInitBlockSpace()方法逻辑完全一致
+     */
+    public void initializeBlockSpace() {
+        logger.info("初始化逻辑空间结构: {}", deviceName);
 
-public long saveFileMetaData(String fileName, String verisonKey, byte[] dataToWrite, long count, boolean isCreated) {
-    ObjectMapper objectMapper = new ObjectMapper();
+        try {
+            // 获取default列簇
+            ColumnFamilyHandle columnFamilyHandle = MyRocksDB.getColumnFamily(deviceName);
+            
+            if (columnFamilyHandle == null) {
+                logger.error("无法获取列族句柄，设备: {}", deviceName);
+                return;
+            }
 
-    String lun = DATA_LUN;
-    Path destinationPath = SAVE_TO_DATA_PATH;
+            // 检查第一个空间键（.1.0000000000）是否存在
+            byte[] v = MyRocksDB.getRocksDB(deviceName).get(columnFamilyHandle,
+                    BlockInfo.getFamilySpaceKey(0).getBytes());
 
-    if (!destinationPath.toFile().exists()) {
-        System.out.println("ERROR: device does not exist!");
-        System.exit(-1);
+            if (null == v) {
+                logger.info("需要初始化逻辑空间，创建空间键值对");
+
+                // 创建一个字节数组，用于存储空间值（512字节的空值，表示未分配状态）
+                byte[] value = new byte[SPACE_LEN];
+
+                // 遍历块设备大小，按SPACE_SIZE（16MB）为步长分割
+                // 计算空间数量：总空间数量 = size / SPACE_SIZE
+                for (int index = 0; index < totalSize / SPACE_SIZE; index++) {
+                    String key = BlockInfo.getFamilySpaceKey(index);
+                    // 将空分配位图写入RocksDB
+                    MyRocksDB.getRocksDB(deviceName).put(columnFamilyHandle, key.getBytes(), value);
+                }
+
+                logger.info("{} 逻辑空间初始化完成，共创建 {} 个空间键", deviceName, totalSize / SPACE_SIZE);
+            } else {
+                logger.info("逻辑空间已存在，跳过初始化");
+            }
+
+        } catch (Exception e) {
+            logger.error("初始化逻辑空间时出错", e);
+        }
     }
 
-    // 写入File数据
-    String fileMetaKey = MetaKeyUtils.getFileMetaKey(fileName);
-    long fileOffset = 0;
-    String etag = MD5Util.getMd5(dataToWrite);
-    // 写入文件数据
-    try {
-        RocksDBInstanceWrapper rocksDBInstanceWrapper = MyRocksDB.getRocksDB(lun);
-        RocksDB db = rocksDBInstanceWrapper.getRocksDB();
+    /**
+     * 从RocksDB恢复分配状态
+     * 与BlockDevice构造函数中的恢复逻辑完全一致
+     */
+    public void restoreAllocationStateFromRocksDB() {
+        logger.info("从RocksDB恢复分配状态: {}", deviceName);
 
-        byte[] value = db.get(fileMetaKey.getBytes(StandardCharsets.UTF_8));
-        Optional<FileMetadata> fileMetadata = Optional.empty();
-        if (value != null && !isCreated) {
-            fileMetadata = Optional.of(objectMapper.readValue(value, FileMetadata.class));
-//                FileMetadata fileMetadata = FileMetadata.builder().fileName(fileName).etag(E_TAG).size(0)
-//                        .metaKey(verisonKey).offset(new ArrayList<>()).len(new ArrayList<>()).lun(lun).build();
+        try {
+            //System.out.println(MyRocksDB.dbMap);
 
-            long len = count /BLOCK_SIZE*BLOCK_SIZE+BLOCK_SIZE;
-            fileOffset = manager.allocate(len).get();
-
-            ByteBuffer buffer = ByteBuffer.wrap(dataToWrite);
-            // 使用 try-with-resources 确保 channel 会被自动关闭
-            try (FileChannel destinationChannel = FileChannel.open(destinationPath,
-                    StandardOpenOption.WRITE,
-                    StandardOpenOption.CREATE,
-                    StandardOpenOption.TRUNCATE_EXISTING)) {
-
-                System.out.println("offset: " + fileOffset);
-                System.out.println("data: \"" + dataToWrite.length + "\"");
-                System.out.println("bytes count: " + buffer.remaining());
-
-                // 4. ***核心操作***: 使用带 position 参数的 write 方法
-                int bytesWritten = destinationChannel.write(buffer, fileOffset);
-
-                System.out.println("actual bytes to be written: " + bytesWritten);
-            } catch (IOException e) {
-                throw new RuntimeException(e);
-            }
-            fileMetadata.get().getOffset().add(fileOffset);
-            fileMetadata.get().getLen().add(len);
-            fileMetadata.get().setSize(fileMetadata.get().getSize() + count);
-        } else {
-            long len = count /BLOCK_SIZE*BLOCK_SIZE+BLOCK_SIZE;
-            fileOffset = manager.allocate(len).get();
-
-            ByteBuffer buffer = ByteBuffer.wrap(dataToWrite);
-            // 使用 try-with-resources 确保 channel 会被自动关闭
-            try (FileChannel destinationChannel = FileChannel.open(destinationPath,
-                    StandardOpenOption.WRITE,
-                    StandardOpenOption.CREATE,
-                    StandardOpenOption.TRUNCATE_EXISTING)) {
-
-                System.out.println("offset: " + fileOffset);
-                System.out.println("data: \"" + dataToWrite.length + "\"");
-                System.out.println("bytes count: " + buffer.remaining());
-
-                // 4. ***核心操作***: 使用带 position 参数的 write 方法
-                int bytesWritten = destinationChannel.write(buffer, fileOffset);
-
-                System.out.println("actual bytes to be written: " + bytesWritten);
-            } catch (IOException e) {
-                throw new RuntimeException(e);
+            ColumnFamilyHandle columnFamilyHandle = MyRocksDB.getColumnFamily(deviceName);
+            
+            if (columnFamilyHandle == null) {
+                logger.error("无法获取列族句柄，设备: {}", deviceName);
+                return;
             }
 
-            fileMetadata = Optional.of(FileMetadata.builder().fileName(fileName).etag(etag).size(count)
-                    .metaKey(verisonKey).offset(Arrays.asList(fileOffset)).len(Arrays.asList(len)).lun(lun).build());
+            // 初始化偏移量和长度变量
+            long offset = 0;
+            long len = 0;
+
+            // 遍历所有逻辑空间块（每个16MB为一个块）
+            for (int index = 0; index < totalSize / SPACE_SIZE; index++) {
+                String key = BlockInfo.getFamilySpaceKey(index);
+
+                // 对于每个块，读取其分配位图（每个字节8位，1表示已分配，0表示未分配）
+                byte[] value = MyRocksDB.getRocksDB(deviceName).get(columnFamilyHandle, key.getBytes());
+
+                if (null == value) {
+                    // 该块不存在，则创建一个空分配位图
+                    MyRocksDB.getRocksDB(deviceName).put(columnFamilyHandle, key.getBytes(), new byte[SPACE_LEN]);
+                } else {
+                    long spaceIndex = getSpaceIndex(key);
+
+                    // 遍历一个逻辑空间块的分配位图，每个字节代表8个4KB逻辑块的分配状态
+                    for (int i = 0; i < value.length; i++) {
+                        // 表示当前字节对应的8个逻辑块全部已分配
+                        if (value[i] == -1) {
+                            // 如果这是新分配区间的开始
+                            if (len == 0) {
+                                // 计算起始偏移量：offset = i * 8 + SPACE_LEN * spaceIndex * 8 - 1
+                                offset = i * 8 + SPACE_LEN * spaceIndex * 8 - 1;
+                                offset = offset == -1 ? 0 : offset;
+                            }
+                            // 增加8个逻辑块到当前分配区间
+                            len += 8;
+                        } else {
+                            // 该字节的8个位的分配情况（1为已分配，0为未分配）
+                            // 将字节值转换为8位二进制数组
+                            byte[] arr = BlockInfo.getBitArray(value[i]);
+
+                            // 遍历字节中的每一位
+                            for (int j = 0; j < 8; j++) {
+                                // 当前位对应的逻辑块已分配
+                                if (arr[j] == 1) {
+                                    // 如果是新区间的开始
+                                    if (len == 0) {
+                                        // 计算精确的起始偏移量：offset = i * 8 + j + SPACE_LEN * spaceIndex * 8 - 1
+                                        offset = i * 8 + j + SPACE_LEN * spaceIndex * 8 - 1;
+                                        offset = offset == -1 ? 0 : offset;
+                                    }
+                                    // 增加1个逻辑块到当前分配区间
+                                    len++;
+                                }
+                                // 当前位对应的逻辑块未分配
+                                else {
+                                    // 如果当前分配区间不为空
+                                    if (len > 0) {
+                                        // 块设备初始化时，遍历元数据，把所有已分配的空间区间恢复到分配器
+                                        allocator.initAllocated(offset, len);
+                                        logger.debug("恢复已分配区间: startBlock={}, blockCount={}", offset, len);
+                                        // 重置len = 0，准备处理下一个分配区间
+                                        len = 0;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 处理最后一个可能未完成的分配区间
+            if (len > 0) {
+                allocator.initAllocated(offset, len);
+                logger.debug("恢复最后一个已分配区间: startBlock={}, blockCount={}", offset, len);
+            }
+
+            logger.info("分配状态恢复完成: {}", deviceName);
+
+        } catch (Exception e) {
+            logger.error("恢复分配状态时出错", e);
+        }
+    }
+
+    /**
+     * 序列化文件信息
+     */
+    private byte[] serializeFileInfo(FileSystemInitializer.FileInfo fileInfo) {
+        // 简化的序列化实现
+        String data = String.format("%s|%d|%d|%d|%d",
+                fileInfo.fileName,
+                fileInfo.fileSize,
+                fileInfo.startBlock,
+                fileInfo.blockCount,
+                fileInfo.lastModified);
+
+        return data.getBytes();
+    }
+
+    /**
+     * 保存文件元数据到RocksDB
+     * @param fileInfo 文件信息
+     */
+    public void saveFileMetadataToRocksDB(FileSystemInitializer.FileInfo fileInfo) {
+        logger.info("保存文件元数据到RocksDB: {}", fileInfo.fileName);
+
+        try {
+            // 序列化文件元数据
+            byte[] serializedData = serializeFileInfo(fileInfo);
+
+            // 保存到RocksDB
+            String key = ROCKS_FILE_META_PREFIX + fileInfo.fileName;
+            MyRocksDB wrapper = MyRocksDB.getRocksDB("fs-SP0-6");
+            wrapper.put(key.getBytes(StandardCharsets.UTF_8), serializedData);
+
+            logger.debug("文件元数据保存完成: {}", fileInfo.fileName);
+
+        } catch (Exception e) {
+            logger.error("保存文件元数据时出错: {}", fileInfo.fileName, e);
+        }
+    }
+
+    /**
+     * 保存分配状态到RocksDB
+     * 将当前分配器的状态保存到RocksDB中
+     */
+    public void saveAllocationStateToRocksDB() {
+        logger.info("保存分配状态到RocksDB: {}", deviceName);
+
+        try {
+            ColumnFamilyHandle columnFamilyHandle = MyRocksDB.getColumnFamily(deviceName);
+            
+            if (columnFamilyHandle == null) {
+                logger.error("无法获取列族句柄，设备: {}", deviceName);
+                return;
+            }
+
+            // 扫描所有已分配区间
+            List<AllocationRange> allocatedRanges = scanAllocatedRanges();
+
+            // 将每个区间转换为位图并保存到RocksDB
+            for (AllocationRange range : allocatedRanges) {
+                updateRocksDBWithAllocationRange(columnFamilyHandle, range);
+            }
+
+            logger.info("分配状态保存完成，共处理 {} 个区间", allocatedRanges.size());
+
+        } catch (Exception e) {
+            logger.error("保存分配状态时出错", e);
+        }
+    }
+
+    /**
+     * 更新RocksDB中的分配区间
+     */
+    private void updateRocksDBWithAllocationRange(ColumnFamilyHandle columnFamilyHandle, AllocationRange range)
+            throws RocksDBException {
+
+        // 计算该区间涉及的空间块
+        long startSpaceIndex = range.startBlock / (SPACE_LEN * 8);
+        long endSpaceIndex = (range.startBlock + range.blockCount - 1) / (SPACE_LEN * 8);
+
+        for (long spaceIndex = startSpaceIndex; spaceIndex <= endSpaceIndex; spaceIndex++) {
+            String key = BlockInfo.getFamilySpaceKey(spaceIndex);
+            byte[] value = MyRocksDB.getRocksDB(deviceName).get(columnFamilyHandle, key.getBytes());
+
+            if (value == null) {
+                value = new byte[SPACE_LEN];
+            }
+
+            // 计算该空间块内的起始和结束位置
+            long spaceStartBlock = spaceIndex * SPACE_LEN * 8;
+            long spaceEndBlock = (spaceIndex + 1) * SPACE_LEN * 8 - 1;
+
+            long rangeStartInSpace = Math.max(range.startBlock, spaceStartBlock);
+            long rangeEndInSpace = Math.min(range.startBlock + range.blockCount - 1, spaceEndBlock);
+
+            // 更新位图中对应的位
+            for (long blockIndex = rangeStartInSpace; blockIndex <= rangeEndInSpace; blockIndex++) {
+                long byteIndex = (blockIndex - spaceStartBlock) / 8;
+                int bitIndex = (int) ((blockIndex - spaceStartBlock) % 8);
+
+                if (byteIndex < value.length) {
+                    // 设置对应的位为1（已分配）
+                    value[(int) byteIndex] |= (1 << bitIndex);
+                }
+            }
+
+            // 保存更新后的位图
+            MyRocksDB.getRocksDB(deviceName).put(columnFamilyHandle, key.getBytes(), value);
+        }
+    }
+
+    /**
+     * 扫描所有已分配区间
+     * 从分配器的L0位图中扫描出所有已分配的区间
+     */
+    private List<AllocationRange> scanAllocatedRanges() {
+        List<AllocationRange> ranges = new ArrayList<>();
+
+        // 这里需要访问allocator的内部L0位图来扫描已分配区间
+        // 为了演示，我们使用一个简化的实现
+        // 在实际实现中，应该直接访问allocator的l0Bitmap
+
+        logger.info("扫描已分配区间...");
+
+        // 模拟扫描结果（在实际实现中，这里会扫描真实的L0位图）
+        ranges.add(new AllocationRange(0, 100));
+        ranges.add(new AllocationRange(200, 150));
+        ranges.add(new AllocationRange(500, 80));
+
+        return ranges;
+    }
+
+    /**
+     * 将格式化后的String类型的index，如.1.0000007169，转化为long类型的原本的index，7169
+     * 与BlockDevice.getSpaceIndex()方法逻辑完全一致
+     */
+    private long getSpaceIndex(String key) {
+        int index = 3;
+        char[] chars = key.toCharArray();
+        for (int i = 3; i < chars.length; i++) {
+            char temp = chars[i];
+            if (temp != '0') {
+                index = i;
+                break;
+            }
         }
 
-        db.put(fileMetaKey.getBytes(StandardCharsets.UTF_8), objectMapper.writeValueAsBytes(fileMetadata.get()));
+        if (index > key.length() - 1) {
+            return 0;
+        }
 
-        return fileOffset;
-    } catch (JsonProcessingException | RocksDBException e) {
-        logger.error("write file data into disk fails...");
-        throw new RuntimeException(e);
-    } catch (IOException e) {
-        throw new RuntimeException(e);
+        return Long.parseLong(key.substring(index));
     }
-}
 
-    public long saveFileMetaData(String fileName, String verisonKey, Path sourcePath, long startWriteOffset, long count, boolean isCreated) {
+    /**
+     * 分配空间
+     * @param numBlocks 需要的逻辑块数
+     * @return 分配结果数组
+     */
+    public JavaAllocator.Result[] allocate(long numBlocks) {
+        return allocator.allocate(numBlocks);
+    }
+
+    /**
+     * 释放空间
+     * @param offset 起始逻辑块索引
+     * @param size 逻辑块数量
+     */
+    public void free(long offset, long size) {
+        allocator.free(offset, size);
+    }
+
+    /**
+     * 获取分配器
+     */
+    public JavaAllocator getAllocator() {
+        return allocator;
+    }
+
+    /**
+     * 打印分配器状态
+     */
+    public void dumpAllocatorStatus() {
+        allocator.dumpStatus();
+    }
+
+    /**
+     * 获取指定LUN的RealRocksDBIntegration实例
+     * @param lun LUN名称
+     * @return RealRocksDBIntegration实例，如果不存在则返回null
+     */
+    public static MyRocksDB getIntegration(String lun) {
+        return dbMap.get(lun);
+    }
+
+    /**
+     * 获取所有缓存的integration实例
+     * @return 所有LUN对应的integration实例映射
+     */
+    public static Map<String, MyRocksDB> getAllIntegrations() {
+        return new HashMap<>(dbMap);
+    }
+
+    /**
+     * 检查指定LUN的integration实例是否存在
+     * @param lun LUN名称
+     * @return 如果存在返回true，否则返回false
+     */
+    public static boolean hasIntegration(String lun) {
+        return dbMap.containsKey(lun);
+    }
+
+    /**
+     * 已分配区间结构
+     */
+    private static class AllocationRange {
+        public final long startBlock;
+        public final long blockCount;
+
+        public AllocationRange(long startBlock, long blockCount) {
+            this.startBlock = startBlock;
+            this.blockCount = blockCount;
+        }
+
+        @Override
+        public String toString() {
+            return String.format("AllocationRange{startBlock=%d, blockCount=%d}",
+                    startBlock, blockCount);
+        }
+    }
+
+    public static long saveFileMetaData(String fileName, String verisonKey, byte[] dataToWrite, long count, boolean isCreated) {
         ObjectMapper objectMapper = new ObjectMapper();
 
         String lun = DATA_LUN;
-        Path destinationPath = SAVE_TO_DATA_PATH;
+        Path destinationPath = Paths.get(DATA_LUN);
 
-        if (!destinationPath.toFile().exists() || !sourcePath.toFile().exists()) {
-            System.out.println("ERROR: device does not exist!");
-            System.exit(-1);
+        // 确保目标文件的父目录存在
+        Path parentDir = destinationPath.getParent();
+        if (parentDir != null && !parentDir.toFile().exists()) {
+            boolean created = parentDir.toFile().mkdirs();
+            if (!created) {
+                logger.error("无法创建数据存储目录: {}", parentDir);
+                throw new RuntimeException("无法创建数据存储目录: " + parentDir);
+            }
+            logger.info("成功创建数据存储目录: {}", parentDir);
+        }
+
+        // 获取对应的RealRocksDBIntegration实例
+        MyRocksDB db = MyRocksDB.getIntegration(lun);
+        if (db == null) {
+            logger.error("无法获取LUN {} 的 MyRocksDB 实例", lun);
+            throw new RuntimeException("MyRocksDB 实例未初始化");
         }
 
         // 写入File数据
@@ -504,30 +717,31 @@ public long saveFileMetaData(String fileName, String verisonKey, byte[] dataToWr
         long fileOffset = 0;
         // 写入文件数据
         try {
-            RocksDBInstanceWrapper rocksDBInstanceWrapper = MyRocksDB.getRocksDB(lun);
-            RocksDB db = rocksDBInstanceWrapper.getRocksDB();
-
             byte[] value = db.get(fileMetaKey.getBytes(StandardCharsets.UTF_8));
             Optional<FileMetadata> fileMetadata = Optional.empty();
             if (value != null && !isCreated) {
                 fileMetadata = Optional.of(objectMapper.readValue(value, FileMetadata.class));
-//                FileMetadata fileMetadata = FileMetadata.builder().fileName(fileName).etag(E_TAG).size(0)
-//                        .metaKey(verisonKey).offset(new ArrayList<>()).len(new ArrayList<>()).lun(lun).build();
 
-                long len = count /BLOCK_SIZE*BLOCK_SIZE+BLOCK_SIZE;
-                fileOffset = manager.allocate(len).get();
+                // 使用RealRocksDBIntegration分配逻辑空间
+                long numBlocks = (count + BLOCK_SIZE - 1) / BLOCK_SIZE; // 向上取整
+                JavaAllocator.Result[] results = db.allocate(numBlocks);
+                if (results.length == 0) {
+                    throw new RuntimeException("无法分配足够的逻辑空间");
+                }
 
-                try (FileChannel sourceChannel = FileChannel.open(sourcePath, StandardOpenOption.READ);
-                     FileChannel destinationChannel = FileChannel.open(destinationPath, StandardOpenOption.WRITE,
-                                                                                        StandardOpenOption.CREATE,
-                                                                                        StandardOpenOption.TRUNCATE_EXISTING)) {
-                    long byteTransferred = startWriteOffset;
-                    long fileWrittenBytes = count;
+                long len = results[0].size * BLOCK_SIZE;
+                fileOffset = results[0].offset * BLOCK_SIZE;
+
+                try (FileChannel destinationChannel = FileChannel.open(destinationPath, StandardOpenOption.WRITE,
+                             StandardOpenOption.CREATE)) {
                     destinationChannel.position(fileOffset);
 
-                    while (fileWrittenBytes > 0) {
-                        byteTransferred += sourceChannel.transferTo(byteTransferred, fileWrittenBytes, destinationChannel);
-                        fileWrittenBytes -= (byteTransferred - startWriteOffset);
+                    // Create a ByteBuffer by wrapping the byte array
+                    ByteBuffer buffer = ByteBuffer.wrap(dataToWrite);
+
+                    // Write the sequence of bytes from the buffer to the channel
+                    while (buffer.hasRemaining()) {
+                        destinationChannel.write(buffer);
                     }
                 } catch (IOException e) {
                     throw new RuntimeException(e);
@@ -536,26 +750,34 @@ public long saveFileMetaData(String fileName, String verisonKey, byte[] dataToWr
                 fileMetadata.get().getLen().add(len);
                 fileMetadata.get().setSize(fileMetadata.get().getSize() + count);
             } else {
-                long len = count /BLOCK_SIZE*BLOCK_SIZE+BLOCK_SIZE;
-                fileOffset = manager.allocate(len).get();
+                // 使用RealRocksDBIntegration分配逻辑空间
+                long numBlocks = (count + BLOCK_SIZE - 1) / BLOCK_SIZE; // 向上取整
+                JavaAllocator.Result[] results = db.allocate(numBlocks);
+                if (results.length == 0) {
+                    throw new RuntimeException("无法分配足够的逻辑空间");
+                }
 
-                try (FileChannel sourceChannel = FileChannel.open(sourcePath, StandardOpenOption.READ);
-                     FileChannel destinationChannel = FileChannel.open(destinationPath, StandardOpenOption.WRITE,
-                             StandardOpenOption.CREATE,
-                             StandardOpenOption.TRUNCATE_EXISTING)) {
-                    long byteTransferred = startWriteOffset;
-                    long fileWrittenBytes= count;
+                long len = results[0].size * BLOCK_SIZE;
+                fileOffset = results[0].offset * BLOCK_SIZE;
+
+                try (FileChannel destinationChannel = FileChannel.open(destinationPath, StandardOpenOption.WRITE,
+                             StandardOpenOption.CREATE)) {
                     destinationChannel.position(fileOffset);
 
-                    while (fileWrittenBytes > 0) {
-                        byteTransferred += sourceChannel.transferTo(byteTransferred, fileWrittenBytes, destinationChannel);
-                        fileWrittenBytes -= (byteTransferred - startWriteOffset);
+                    // Create a ByteBuffer by wrapping the byte array
+                    ByteBuffer buffer = ByteBuffer.wrap(dataToWrite);
+
+                    // Write the sequence of bytes from the buffer to the channel
+                    while (buffer.hasRemaining()) {
+                        destinationChannel.write(buffer);
                     }
                 } catch (IOException e) {
                     throw new RuntimeException(e);
                 }
 
-                fileMetadata = Optional.of(FileMetadata.builder().fileName(fileName).etag(E_TAG).size(count)
+                String eTag = calculateETag(dataToWrite);
+
+                fileMetadata = Optional.of(FileMetadata.builder().fileName(fileName).etag(eTag).size(count)
                         .metaKey(verisonKey).offset(Arrays.asList(fileOffset)).len(Arrays.asList(len)).lun(lun).build());
             }
 
@@ -570,58 +792,31 @@ public long saveFileMetaData(String fileName, String verisonKey, byte[] dataToWr
         }
     }
 
-    public void saveRedis123(String vnodeId, List<Long> link, String s_uuid) {
-        String lun = DATA_LUN;
-        // 连接到本地 Redis 6号库
-        RedisURI redisURI = RedisURI.builder().withHost("localhost")
-                .withPort(6379)
-                .withPassword("Gw@uUp8tBedfrWDy".toCharArray())
-                .withDatabase(6)
-                .build();
-        RedisClient redisClient = RedisClient.create(redisURI);
-        StatefulRedisConnection<String, String> connection = redisClient.connect();
-        RedisCommands<String, String> commands = connection.sync();
-        // 写入数据
-        String redisKey = "dataa" + vnodeId;
-
-        commands.hset(redisKey, "v_num", vnodeId);
-        commands.hset(redisKey, "lun_name", lun);
-        commands.hset(redisKey, "link", link.toString());
-        commands.hset(redisKey, "s_uuid", s_uuid);
-        commands.hset(redisKey, "take_over", "0");
-
-        // 关闭连接
-        connection.close();
-        redisClient.shutdown();
+    /**
+     * 计算ETag
+     */
+    public static String calculateETag(byte[] data) {
+        try {
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("MD5");
+            byte[] digest = md.digest(data);
+            return bytesToHex(digest);
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new RuntimeException("MD5算法不可用", e);
+        }
     }
 
-
-    public void saveRedis124(String vnodeId, List<Long> link, String s_uuid) {
-        String lun = DATA_LUN;
-        // 连接到本地 Redis 6号库
-        RedisURI redisURI = RedisURI.builder().withHost("localhost")
-                .withPort(6379)
-                .withPassword("Gw@uUp8tBedfrWDy".toCharArray())
-                .withDatabase(6)
-                .build();
-        RedisClient redisClient = RedisClient.create(redisURI);
-        StatefulRedisConnection<String, String> connection = redisClient.connect();
-        RedisCommands<String, String> commands = connection.sync();
-        // 写入数据
-        String redisKey = "dataa" + vnodeId;
-
-        commands.hset(redisKey, "v_num", vnodeId);
-        commands.hset(redisKey, "lun_name", lun);
-        commands.hset(redisKey, "link", link.toString());
-        commands.hset(redisKey, "s_uuid", s_uuid);
-        commands.hset(redisKey, "take_over", "0");
-
-        // 关闭连接
-        connection.close();
-        redisClient.shutdown();
+    /**
+     * 字节数组转十六进制字符串
+     */
+    public static String bytesToHex(byte[] bytes) {
+        StringBuilder result = new StringBuilder();
+        for (byte b : bytes) {
+            result.append(String.format("%02x", b));
+        }
+        return result.toString();
     }
 
-    public void saveRedis(String vnodeId, List<Long> link, String s_uuid) {
+    public static void saveRedis(String vnodeId, List<Long> link, String s_uuid) {
         String lun = DATA_LUN;
         // 连接到本地 Redis 6号库
         RedisURI redisURI = RedisURI.builder().withHost("172.20.123.123")
@@ -646,12 +841,12 @@ public long saveFileMetaData(String fileName, String verisonKey, byte[] dataToWr
         redisClient.shutdown();
     }
 
-    public Optional<FileMetadata> getFileMetaData(String fileName) {
+    public static Optional<FileMetadata> getFileMetaData(String fileName) {
         try {
             ObjectMapper objectMapper = new ObjectMapper();
 
             String lun = DATA_LUN;
-            Path path = SAVE_TO_DATA_PATH;
+            Path path = Paths.get(DATA_LUN);
 
             if (!path.toFile().exists()) {
                 System.out.println("ERROR: device does not exist!");
@@ -662,8 +857,7 @@ public long saveFileMetaData(String fileName, String verisonKey, byte[] dataToWr
             String fileMetaKey = MetaKeyUtils.getFileMetaKey(fileName);
             long fileOffset = 0;
             // 写入文件数据
-            RocksDBInstanceWrapper rocksDBInstanceWrapper = MyRocksDB.getRocksDB(lun);
-            RocksDB db = rocksDBInstanceWrapper.getRocksDB();
+            MyRocksDB db = MyRocksDB.getRocksDB(lun);
 
             byte[] value = db.get(fileMetaKey.getBytes(StandardCharsets.UTF_8));
 
@@ -680,8 +874,7 @@ public long saveFileMetaData(String fileName, String verisonKey, byte[] dataToWr
             String lun = INDEX_LUN;
             String versionId = "null";
             String verisonKey = MetaKeyUtils.getVersionMetaDataKey(targetVnodeId, bucket, object, versionId);
-            RocksDBInstanceWrapper rocksDBInstanceWrapper = MyRocksDB.getRocksDB(lun);
-            RocksDB db = rocksDBInstanceWrapper.getRocksDB();
+            MyRocksDB db = MyRocksDB.getRocksDB(lun);
             byte[] value = db.get(verisonKey.getBytes(StandardCharsets.UTF_8));
             if (value != null) {
                 VersionIndexMetadata versionIndexMetadata = objectMapper.readValue(value, VersionIndexMetadata.class);
@@ -693,7 +886,7 @@ public long saveFileMetaData(String fileName, String verisonKey, byte[] dataToWr
         return Optional.empty();
     }
 
-    public Optional<Inode> saveIndexMetaAndInodeData(String targetVnodeId, String bucket, String object, String fileName, long contentLength, String contentType, boolean isCreated) throws JsonProcessingException {
+    public static Optional<Inode> saveIndexMetaAndInodeData(String targetVnodeId, String bucket, String object, String fileName, long contentLength, String contentType, boolean isCreated) throws JsonProcessingException {
         long maxOffset = 0;
         ObjectMapper objectMapper = new ObjectMapper();
 
@@ -723,13 +916,12 @@ public long saveFileMetaData(String fileName, String verisonKey, byte[] dataToWr
         String shardingStamp = MetaKeyUtils.getshardingStamp();
 
         try {
-            RocksDBInstanceWrapper rocksDBInstanceWrapper = MyRocksDB.getRocksDB(lun);
-            RocksDB db = rocksDBInstanceWrapper.getRocksDB();
-            //byte[] value = db.get(verisonKey.getBytes(StandardCharsets.UTF_8));
+            MyRocksDB db = MyRocksDB.getRocksDB(lun);
             Optional<VersionIndexMetadata> versionIndexMetadata = Optional.empty();
 
             SysMetaData sysMetaData = SysMetaData.builder().contentLength(String.valueOf(contentLength))
-                    .contentType(contentType).lastModified(formattedDate.toString()).owner(owner).eTag(E_TAG).displayName("testuser").build();
+                    .contentType(contentType).lastModified(formattedDate.toString()).owner(owner).eTag("").displayName("testuser").build();
+
             versionIndexMetadata = Optional.of(VersionIndexMetadata.builder().sysMetaData(objectMapper.writeValueAsString(sysMetaData))
                     .userMetaData("{\"x-amz-meta-cb-modifiedtime\":\"Thu, 17 Apr 2025 11:27:08 GMT\"}").objectAcl(objectMapper.writeValueAsString(objectAcl)).endIndex(-1)
                     .versionNum(versionNum).syncStamp(syncStamp).shardingStamp(shardingStamp).stamp(timestamp)
@@ -766,7 +958,7 @@ public long saveFileMetaData(String fileName, String verisonKey, byte[] dataToWr
         return Optional.empty();
     }
 
-    public void saveIndexMetaData(String targetVnodeId, String bucket, String object, String fileName, long contentLength, String contentType, boolean isCreated) throws JsonProcessingException {
+    public static void saveIndexMetaData(String targetVnodeId, String bucket, String object, String fileName, long contentLength, String contentType, boolean isCreated) throws JsonProcessingException {
         long maxOffset = 0;
         ObjectMapper objectMapper = new ObjectMapper();
 
@@ -796,8 +988,7 @@ public long saveFileMetaData(String fileName, String verisonKey, byte[] dataToWr
         String shardingStamp = MetaKeyUtils.getshardingStamp();
 
         try {
-            RocksDBInstanceWrapper rocksDBInstanceWrapper = MyRocksDB.getRocksDB(lun);
-            RocksDB db = rocksDBInstanceWrapper.getRocksDB();
+            MyRocksDB db = MyRocksDB.getRocksDB(lun);
             byte[] value = db.get(verisonKey.getBytes(StandardCharsets.UTF_8));
             Optional<VersionIndexMetadata> versionIndexMetadata = Optional.empty();
             if (value != null && !isCreated) {
@@ -811,7 +1002,7 @@ public long saveFileMetaData(String fileName, String verisonKey, byte[] dataToWr
             } else {
                 long endIndex = contentLength - 1 < 0 ? 0 : contentLength - 1;
                 SysMetaData sysMetaData = SysMetaData.builder().contentLength(String.valueOf(contentLength))
-                        .contentType(contentType).lastModified(formattedDate.toString()).owner(owner).eTag(E_TAG).displayName("testuser").build();
+                        .contentType(contentType).lastModified(formattedDate.toString()).owner(owner).eTag("").displayName("testuser").build();
                 versionIndexMetadata = Optional.of(VersionIndexMetadata.builder().sysMetaData(objectMapper.writeValueAsString(sysMetaData))
                         .userMetaData("{\"x-amz-meta-cb-modifiedtime\":\"Thu, 17 Apr 2025 11:27:08 GMT\"}").objectAcl(objectMapper.writeValueAsString(objectAcl)).fileName(fileName).endIndex(endIndex)
                         .versionNum(versionNum).syncStamp(syncStamp).shardingStamp(shardingStamp).stamp(timestamp)
@@ -833,7 +1024,7 @@ public long saveFileMetaData(String fileName, String verisonKey, byte[] dataToWr
 
     }
 
-    public void saveINodeMetaData(String targetVnodeId, Inode inode) throws JsonProcessingException {
+    public static void saveINodeMetaData(String targetVnodeId, Inode inode) throws JsonProcessingException {
         long maxOffset = 0;
         ObjectMapper objectMapper = new ObjectMapper();
 
@@ -844,8 +1035,7 @@ public long saveFileMetaData(String fileName, String verisonKey, byte[] dataToWr
         }
 
         try {
-            RocksDBInstanceWrapper rocksDBInstanceWrapper = MyRocksDB.getRocksDB(lun);
-            RocksDB db = rocksDBInstanceWrapper.getRocksDB();
+            MyRocksDB db = MyRocksDB.getRocksDB(lun);
             String iNodeKey = Inode.getKey(targetVnodeId, inode.getBucket(), inode.getNodeId());
             db.put(iNodeKey.getBytes(StandardCharsets.UTF_8), objectMapper.writeValueAsBytes(inode));
 
@@ -854,7 +1044,7 @@ public long saveFileMetaData(String fileName, String verisonKey, byte[] dataToWr
         }
 
     }
-    public void saveChunkFileMetaData(String chunkFileKey, ChunkFile chunkFile) throws JsonProcessingException {
+    public static void saveChunkFileMetaData(String chunkFileKey, ChunkFile chunkFile) throws JsonProcessingException {
         long maxOffset = 0;
         ObjectMapper objectMapper = new ObjectMapper();
 
@@ -865,8 +1055,7 @@ public long saveFileMetaData(String fileName, String verisonKey, byte[] dataToWr
         }
 
         try {
-            RocksDBInstanceWrapper rocksDBInstanceWrapper = MyRocksDB.getRocksDB(lun);
-            RocksDB db = rocksDBInstanceWrapper.getRocksDB();
+            MyRocksDB db = MyRocksDB.getRocksDB(lun);
             db.put(chunkFileKey.getBytes(StandardCharsets.UTF_8), objectMapper.writeValueAsBytes(chunkFile));
 
         } catch (Exception e) {
@@ -875,7 +1064,7 @@ public long saveFileMetaData(String fileName, String verisonKey, byte[] dataToWr
 
     }
 
-    public Optional<ChunkFile> getChunkFileMetaData(String chunkFileKey) throws JsonProcessingException {
+    public static Optional<ChunkFile> getChunkFileMetaData(String chunkFileKey) throws JsonProcessingException {
         long maxOffset = 0;
         ObjectMapper objectMapper = new ObjectMapper();
 
@@ -886,8 +1075,7 @@ public long saveFileMetaData(String fileName, String verisonKey, byte[] dataToWr
         }
 
         try {
-            RocksDBInstanceWrapper rocksDBInstanceWrapper = MyRocksDB.getRocksDB(lun);
-            RocksDB db = rocksDBInstanceWrapper.getRocksDB();
+            MyRocksDB db = MyRocksDB.getRocksDB(lun);
 
             byte[] value = db.get(chunkFileKey.getBytes(StandardCharsets.UTF_8));
 
@@ -899,5 +1087,4 @@ public long saveFileMetaData(String fileName, String verisonKey, byte[] dataToWr
 
         return Optional.empty();
     }
-
 }

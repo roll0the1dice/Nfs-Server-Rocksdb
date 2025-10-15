@@ -16,4 +16,8 @@ public class GlobalConstant {
     public static final int SPACE_LEN = (int) SPACE_SIZE / 4096 / 8;
 
     public static final int VNODE_NUM = 65536;
+
+    public static final int BLOCK_SIZE_4K = 4 * 1024;
+
+    public static final String ROCKS_FILE_META_PREFIX = "#";
 }

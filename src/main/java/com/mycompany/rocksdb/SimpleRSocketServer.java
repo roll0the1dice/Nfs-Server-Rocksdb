@@ -3,11 +3,10 @@ package com.mycompany.rocksdb;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mycompany.rocksdb.POJO.ChunkFile;
 import com.mycompany.rocksdb.POJO.Inode;
+import com.mycompany.rocksdb.myrocksdb.MyRocksDB;
 import com.mycompany.rocksdb.netserver.Nfsv3Server;
 import com.mycompany.rocksdb.utils.MetaKeyUtils;
-import com.sun.org.apache.regexp.internal.RE;
 import io.netty.buffer.ByteBuf;
-import io.netty.buffer.Unpooled;
 import io.rsocket.*;
 import io.rsocket.frame.decoder.PayloadDecoder;
 import io.rsocket.transport.netty.server.CloseableChannel;
@@ -318,7 +317,7 @@ public class SimpleRSocketServer extends AbstractRSocket {
 
             // 这里可以根据实际需求将元数据存储到文件、数据库或内存等
             // 示例：简单写入到一个本地文件
-            Nfsv3Server.getMyRocksDB().saveIndexMetaData(targetVnodeId, bucket, object, fileName, Long.parseLong(contentLength), contentType, false);
+            MyRocksDB.saveIndexMetaData(targetVnodeId, bucket, object, fileName, Long.parseLong(contentLength), contentType, false);
             log.info("Metadata stored: {}", metadata);
             return Mono.just(DefaultPayload.create("Metadata stored", PayloadMetaType.SUCCESS.name()));
         } catch (Exception e) {
@@ -342,7 +341,7 @@ public class SimpleRSocketServer extends AbstractRSocket {
             //String s_uuid = "0001";
             String s_uuid = socketReqMsg.get("s_uuid");
 
-            Nfsv3Server.getMyRocksDB().saveRedis(objectVnodeId, link, s_uuid);
+            MyRocksDB.saveRedis(objectVnodeId, link, s_uuid);
             log.info("Redis data stored: {}", metadata);
             return Mono.just(DefaultPayload.create("Redis data stored", PayloadMetaType.SUCCESS.name()));
         } catch (Exception e) {
@@ -361,7 +360,7 @@ public class SimpleRSocketServer extends AbstractRSocket {
 
             // 这里可以根据实际需求将元数据存储到文件、数据库或内存等
             // 示例：简单写入到一个本地文件
-            ChunkFile chunkFile = Nfsv3Server.getMyRocksDB().getChunkFileMetaData(chunkFileKey).orElseThrow(() -> new RuntimeException("handleGetChunkFileMetaData Error!!!!!!"));
+            ChunkFile chunkFile = MyRocksDB.getChunkFileMetaData(chunkFileKey).orElseThrow(() -> new RuntimeException("handleGetChunkFileMetaData Error!!!!!!"));
             log.info("Metadata stored: {}", chunkFile);
             return Mono.just(DefaultPayload.create(objectMapper.writeValueAsBytes(chunkFile), PayloadMetaType.SUCCESS.name().getBytes()));
         } catch (Exception e) {
@@ -381,7 +380,7 @@ public class SimpleRSocketServer extends AbstractRSocket {
 
             // 这里可以根据实际需求将元数据存储到文件、数据库或内存等
             // 示例：简单写入到一个本地文件
-            Nfsv3Server.getMyRocksDB().saveChunkFileMetaData(chunkKey, chunkFile);
+            MyRocksDB.saveChunkFileMetaData(chunkKey, chunkFile);
             log.info("Metadata stored: {}", chunkFile);
             return Mono.just(DefaultPayload.create("handleSaveChunkFileMetaData sucess", PayloadMetaType.SUCCESS.name()));
         } catch (Exception e) {
@@ -402,7 +401,7 @@ public class SimpleRSocketServer extends AbstractRSocket {
 
             // 这里可以根据实际需求将元数据存储到文件、数据库或内存等
             // 示例：简单写入到一个本地文件
-            Nfsv3Server.getMyRocksDB().saveINodeMetaData(targetVnodeId, inode);
+            MyRocksDB.saveINodeMetaData(targetVnodeId, inode);
             log.info("Metadata stored: {}", inode);
             return Mono.just(DefaultPayload.create("handleSaveINodeMetaData sucess", PayloadMetaType.SUCCESS.name()));
         } catch (Exception e) {

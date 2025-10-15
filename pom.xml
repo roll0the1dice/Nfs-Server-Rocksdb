@@ -39,6 +39,17 @@
     </dependency>
 
     <dependency>
+      <groupId>org.eclipse.collections</groupId>
+      <artifactId>eclipse-collections</artifactId>
+      <version>10.4.0</version>
+    </dependency>
+    <dependency>
+      <groupId>org.eclipse.collections</groupId>
+      <artifactId>eclipse-collections-api</artifactId>
+      <version>10.4.0</version>
+    </dependency>
+
+    <dependency>
       <groupId>io.rsocket</groupId>
       <artifactId>rsocket-core</artifactId>
       <version>1.0.0-RC5</version>
@@ -111,6 +122,12 @@
     <dependency>
       <groupId>io.vertx</groupId>
       <artifactId>vertx-core</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>io.vertx</groupId>
+      <artifactId>vertx-rx-java2</artifactId>
+      <version>3.7.1</version>
     </dependency>
 
     <!-- Reactor 核心库的版本需要单独指定，因为它不属于 Vert.x stack -->

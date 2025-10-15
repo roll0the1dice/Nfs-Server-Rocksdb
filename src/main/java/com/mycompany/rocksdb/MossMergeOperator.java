@@ -1,4 +1,4 @@
-package com.macrosan.database.rocksdb;
+package com.mycompany.rocksdb;
 
 import org.rocksdb.MergeOperator;
 

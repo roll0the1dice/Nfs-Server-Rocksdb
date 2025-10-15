@@ -103,7 +103,7 @@ public class MsVnodeUtils {
     }
 
     public static void main(String[] args) {
-        String bucket = "12321";
+        String bucket = "test";
         long vnodeNum = VNODE_NUM;
 
         String targetVnodeId = MsVnodeUtils.getTargetVnodeId(bucket, vnodeNum);

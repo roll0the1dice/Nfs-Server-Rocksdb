@@ -1,6 +1,7 @@
 package com.mycompany.rocksdb;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.mycompany.rocksdb.myrocksdb.MyRocksDB;
 import com.mycompany.rocksdb.netserver.Nfsv3Server;
 import io.rsocket.Payload;
 import io.rsocket.util.DefaultPayload;
@@ -177,7 +178,7 @@ public class RequestChannalHandler {
                     buffer.put(array);
                 }
 
-                Nfsv3Server.getMyRocksDB().saveFileMetaData(fileName, verisonKey, buffer.array(), count, isCreated);
+                MyRocksDB.saveFileMetaData(fileName, verisonKey, buffer.array(), count, isCreated);
                 byte[] hash = digest.digest();
                 return bytesToHex(hash);
             }
