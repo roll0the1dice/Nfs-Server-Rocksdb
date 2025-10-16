@@ -1166,8 +1166,8 @@ public class Nfsv3Server extends AbstractVerticle {
         MyRocksDB.saveChunkFileMetaData(chunkKey, chunkFile);
     }
 
-    public static void appendData(List<Inode.InodeData> list, Inode.InodeData data, Inode inode, byte[] dataToWrite) throws JsonProcessingException {
-        if (list.isEmpty()) {
+    if (list.isEmpty()) {
+            public static void appendData(List<Inode.InodeData> list, Inode.InodeData data, Inode inode, byte[] dataToWrite) throws JsonProcessingException {
             if (StringUtils.isBlank(data.fileName)) {
                 createHole(list ,data, inode);
             } else {
@@ -1183,13 +1183,13 @@ public class Nfsv3Server extends AbstractVerticle {
 
             String targetVnodeId = MetaKeyUtils.getTargetVnodeId(inode.getBucket());
             if (StringUtils.isNotBlank(data.fileName) && dataToWrite != null) {
-                String vnodeId = data.fetchInodeDataTargetVnodeId();
-                List<Long> link = Arrays.asList(((long) Long.parseLong(vnodeId)));
-                String s_uuid = "0001";
-                MyRocksDB.saveRedis(vnodeId, link, s_uuid);
+                // String vnodeId = data.fetchInodeDataTargetVnodeId();
+                // List<Long> link = Arrays.asList(((long) Long.parseLong(vnodeId)));
+                // String s_uuid = "0001";
+                // MyRocksDB.saveRedis(vnodeId, link, s_uuid);
 
-                String verisonKey = MetaKeyUtils.getVersionMetaDataKey(targetVnodeId, inode.getBucket(), inode.getObjName(), null);
-                MyRocksDB.saveFileMetaData(data.getFileName(), verisonKey, dataToWrite, dataToWrite.length, true);
+                //String verisonKey = MetaKeyUtils.getVersionMetaDataKey(targetVnodeId, inode.getBucket(), inode.getObjName(), null);
+                MyRocksDB.saveFileMetaData(targetVnodeId, inode.getBucket(), inode.getObjName(), inode.getVersionId(), dataToWrite, dataToWrite.length, true);
             }
 
             last.setSize(last.getSize() + data.size);
@@ -1270,14 +1270,14 @@ public class Nfsv3Server extends AbstractVerticle {
                 ChunkFile chunkFile = MyRocksDB.getChunkFileMetaData(chunkKey).orElseThrow(() -> new RuntimeException("chunk file not found..."));
                 long updatedtotalSize = Inode.partialOverwrite3(chunkFile, reqOffset, inodeData);
 
-                String vnodeId = inodeData.fetchInodeDataTargetVnodeId();
-                List<Long> link = Arrays.asList(((long) Long.parseLong(vnodeId)));
-                String s_uuid = "0001";
-                MyRocksDB.saveRedis(vnodeId, link, s_uuid);
+                // String vnodeId = inodeData.fetchInodeDataTargetVnodeId();
+                // List<Long> link = Arrays.asList(((long) Long.parseLong(vnodeId)));
+                // String s_uuid = "0001";
+                // MyRocksDB.saveRedis(vnodeId, link, s_uuid);
 
                 String targetVnodeId = MetaKeyUtils.getTargetVnodeId(inode.getBucket());
-                String verisonKey = MetaKeyUtils.getVersionMetaDataKey(targetVnodeId, inode.getBucket(), inode.getObjName(), inode.getVersionId());
-                MyRocksDB.saveFileMetaData(inodeData.getFileName(), verisonKey, dataToWrite, dataToWrite.length, true);
+                //String verisonKey = MetaKeyUtils.getVersionMetaDataKey(targetVnodeId, inode.getBucket(), inode.getObjName(), inode.getVersionId());
+                MyRocksDB.saveFileMetaData(targetVnodeId, inode.getBucket(), inode.getObjName(), inode.getVersionId(), dataToWrite, dataToWrite.length, true);
 
                 chunkFile.setSize(chunkFile.getSize() + updatedtotalSize);
                 inode.setSize(chunkFile.getSize() + updatedtotalSize);
@@ -1460,15 +1460,15 @@ public class Nfsv3Server extends AbstractVerticle {
             String targetVnodeId = MetaKeyUtils.getTargetVnodeId(bucket);
             String object = name;
             String filename = MetaKeyUtils.getObjFileName(bucket, object, requestId);
-            Inode inode = MyRocksDB.saveIndexMetaAndInodeData(targetVnodeId, bucket, object, filename, 0, "text/plain", true).orElseThrow(() -> new RuntimeException("no such inode.."));
+            Inode inode = MyRocksDB.saveIndexMetaAndInodeData(targetVnodeId, bucket, object, filename, 0, "text/plain", true, 12345).orElseThrow(() -> new RuntimeException("no such inode.."));
 
             fileHandleToINode.put(new ByteArrayKeyWrapper(fileHandle), inode);
             //myRocksDB.saveINodeMetaData(targetVnodeId, inode);
 
-            String vnodeId = MetaKeyUtils.getObjectVnodeId(bucket, object);
-            List<Long> link = Arrays.asList(((long) Long.parseLong(vnodeId)));
-            String s_uuid = "0001";
-            MyRocksDB.saveRedis(vnodeId, link, s_uuid);
+            // String vnodeId = MetaKeyUtils.getObjectVnodeId(bucket, object);
+            // List<Long> link = Arrays.asList(((long) Long.parseLong(vnodeId)));
+            // String s_uuid = "0001";
+            // MyRocksDB.saveRedis(vnodeId, link, s_uuid);
 
         }catch (Exception e) {
             log.error("operate db fail..");

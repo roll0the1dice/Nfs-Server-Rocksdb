@@ -178,7 +178,7 @@ public class RequestChannalHandler {
                     buffer.put(array);
                 }
 
-                MyRocksDB.saveFileMetaData(fileName, verisonKey, buffer.array(), count, isCreated);
+                //MyRocksDB.saveFileMetaData(fileName, verisonKey, buffer.array(), count, isCreated);
                 byte[] hash = digest.digest();
                 return bytesToHex(hash);
             }

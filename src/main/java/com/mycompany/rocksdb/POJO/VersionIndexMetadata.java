@@ -8,6 +8,7 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+
 @Data
 @AllArgsConstructor
 @NoArgsConstructor
@@ -69,6 +70,9 @@ public class VersionIndexMetadata {
   @JsonProperty("cookie")
   private long cookie;
 
+  @JsonProperty("inodeObject")
+  private Inode inodeObject;
+
   public static LatestIndexMetadata toLatestIndexMetadata(VersionIndexMetadata indexMetadata) {
     if (indexMetadata == null) {
       return null;
@@ -87,6 +91,7 @@ public class VersionIndexMetadata {
     minusIndexMetadata.setBucket(indexMetadata.getBucket());
     minusIndexMetadata.setInode(indexMetadata.getInode());
     minusIndexMetadata.setCookie(indexMetadata.getCookie());
+    minusIndexMetadata.setInodeObject(indexMetadata.getInodeObject());
 
     // 对于 MinusIndexMetadata 中有而 IndexMetadata 中没有的字段 (shardingStamp)，
     // 这里会保留其默认值 (null)。如果需要从其他地方获取，可以在这里设置。
@@ -113,6 +118,7 @@ public class VersionIndexMetadata {
     indexMetadata.setBucket(versionIndexMetadata.getBucket());
     indexMetadata.setInode(versionIndexMetadata.getInode());
     indexMetadata.setCookie(versionIndexMetadata.getCookie());
+    indexMetadata.setInodeObject(versionIndexMetadata.getInodeObject());
 
     // 对于 MinusIndexMetadata 中有而 IndexMetadata 中没有的字段 (shardingStamp)，
     // 这里会保留其默认值 (null)。如果需要从其他地方获取，可以在这里设置。
@@ -132,6 +138,8 @@ public class VersionIndexMetadata {
       ", storage='" + storage + '\'' +
       ", key='" + key + '\'' +
       ", bucket='" + bucket + '\'' +
+      '}' +
+      ", inodeObject=" + inodeObject +
       '}';
   }
 }

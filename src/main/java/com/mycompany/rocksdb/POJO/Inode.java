@@ -60,6 +60,8 @@ public class Inode {
     int majorDev;
     @JsonProperty("minorDev")
     int minorDev;
+    @JsonProperty("vnodeId")
+    String vnodeId;
     @JsonProperty("bucket")
     String bucket;
     @JsonProperty("objName")
@@ -100,12 +102,21 @@ public class Inode {
                 .cifsMode(cifsMode)
                 .majorDev(majorDev)
                 .minorDev(minorDev)
+                .vnodeId(vnodeId)
                 .build();
     }
 
     public static String getKey(String vnode, String bucket, long nodeId) {
         return ROCKS_INODE_PREFIX + vnode + File.separator + bucket + File.separator
                 + nodeId;
+    }
+
+    public static String getKeyPrefix(String vnode, String bucket, String directoryPath) {
+        String prefix = ROCKS_INODE_PREFIX + vnode + File.separator + bucket + File.separator;
+        if (!directoryPath.equals("/")) {
+            prefix += directoryPath.substring(1) + File.separator;
+        }
+        return prefix;
     }
 
     @Data
@@ -200,7 +211,6 @@ public class Inode {
 //    }
     public static void partialOverwrite(ChunkFile chunkFile, long coverOffset, Inode.InodeData updatedData) {
     ListIterator<Inode.InodeData> it = chunkFile.chunkList.listIterator();
-    List<Inode.InodeData> newChunks = new ArrayList<>();
 
     List<InodeData> deleteList = new LinkedList<>();
     boolean dataAdded = false;
@@ -427,7 +437,6 @@ public class Inode {
 
     public static void partialOverwrite2(ChunkFile chunkFile, long coverOffset, Inode.InodeData updatedData) {
         ListIterator<Inode.InodeData> it = chunkFile.chunkList.listIterator();
-        List<Inode.InodeData> newChunks = new ArrayList<>();
 
         List<InodeData> deleteList = new LinkedList<>();
         boolean addData = false;

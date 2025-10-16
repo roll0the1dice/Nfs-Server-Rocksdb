@@ -45,4 +45,7 @@ public class LatestIndexMetadata {
 
     @JsonProperty("cookie")
     private long cookie;
+
+    @JsonProperty("inodeObject")
+    private Inode inodeObject;
 }

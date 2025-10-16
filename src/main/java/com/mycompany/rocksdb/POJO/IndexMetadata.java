@@ -45,4 +45,7 @@ public class IndexMetadata {
 
     @JsonProperty("cookie")
     private long cookie;
+
+    @JsonProperty("inodeObject")
+    private Inode inodeObject;
 }

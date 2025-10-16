@@ -78,8 +78,9 @@ public class MetaKeyUtils {
         //return "4436";
     }
 
-    public static String getFileMetaKey(String fileName) {
-        return ROCKS_FILE_META_PREFIX + fileName.split(File.separator)[1];
+    // Generate key for file metadata in RocksDB
+    public static String getFileMetaKey(String objectName) {
+        return ROCKS_FILE_META_PREFIX + objectName;
     }
 
     public static String getRequestId() {

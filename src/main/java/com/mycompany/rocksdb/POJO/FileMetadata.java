@@ -20,6 +20,12 @@ public class FileMetadata {
     @JsonProperty("lun")
     private String lun;
 
+    @JsonProperty("vnodeId")
+    private String vnodeId;
+
+    @JsonProperty("bucket")
+    private String bucket;
+
     @JsonProperty("fileName")
     private String fileName;
 
@@ -37,4 +43,8 @@ public class FileMetadata {
 
     @JsonProperty("metaKey")
     private String metaKey;
+
+    public String getKey() {
+        return fileName;
+    }
 }
