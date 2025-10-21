@@ -53,6 +53,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static com.mycompany.rocksdb.constant.GlobalConstant.BLOCK_SIZE;
+import static com.mycompany.rocksdb.constant.GlobalConstant.ROCKS_CHUNK_FILE_KEY;
 import static com.mycompany.rocksdb.utils.MetaKeyUtils.getRequestId;
 import static com.mycompany.rocksdb.utils.NetTool.bytesToHex;
 import static com.mycompany.rocksdb.utils.NetTool.bytesToHex2;
@@ -332,12 +333,12 @@ public class Nfsv3Server extends AbstractVerticle {
 //                case NFSPROC_MKNOD:
 //                    xdrReplyBytes = createNfsMknodReply(xid, buffer, startOffset);
 //                    break;
-//                case NFSPROC_REMOVE:
-//                    xdrReplyBytes = createNfsRemoveReply(xid, buffer, startOffset);
-//                    break;
-//                case NFSPROC_RMDIR:
-//                    xdrReplyBytes = createNfsRmdirReply(xid, buffer, startOffset);
-//                    break;
+               case NFSPROC_REMOVE:
+                   xdrReplyBytes = createNfsRemoveReply(xid, buffer, startOffset);
+                   break;
+               case NFSPROC_RMDIR:
+                   xdrReplyBytes = createNfsRmdirReply(xid, buffer, startOffset);
+                   break;
 //                case NFSPROC_RENAME:
 //                    xdrReplyBytes = createNfsRenameReply(xid, buffer, startOffset);
 //                    break;
@@ -621,44 +622,6 @@ public class Nfsv3Server extends AbstractVerticle {
 
         log.info("fsid {}, inodeId: {}", nfsFileHandle.getFsid(), nfsFileHandle.getInodeId());
 
-        FAttr3 attributes = inodeIdToFAttr3.computeIfPresent(nfsFileHandle.getInodeId(), (key, value) -> {
-            SetAttr3 newAttributes = setattr3args.getNewAttributes();
-            int modeSetIt = newAttributes.getMode().getSetIt();
-            if (modeSetIt != 0) {
-                int mode = newAttributes.getMode().getMode();
-                value.setMode(mode);
-            }
-            int uidSetIt = newAttributes.getUid().getSetIt();
-            if (uidSetIt != 0) {
-                int uid = newAttributes.getUid().getUid();
-                value.setUid(uid);
-            }
-            int gidSetIt = newAttributes.getGid().getSetIt();
-            if (gidSetIt != 0) {
-                int gid = newAttributes.getGid().getGid();
-                value.setGid(gid);
-            }
-            int sizeSetIt = newAttributes.getSize().getSetIt();
-            if (sizeSetIt != 0) {
-                long size = newAttributes.getSize().getSize();
-                value.setSize(size);
-            }
-            int atimeSetToServerTime = newAttributes.getAtime();
-            int mtimeSetToServerTIme = newAttributes.getMtime();
-            long currentTimeMillis = System.currentTimeMillis();
-            int seconds = (int)(currentTimeMillis / 1000);
-            int nseconds = (int)((currentTimeMillis % 1000) * 1_000_000);
-            if (atimeSetToServerTime != 0) {
-                value.setAtimeSeconds(seconds);
-                value.setAtimeNseconds(nseconds);
-            }
-            if (mtimeSetToServerTIme != 0) {
-                value.setMtimeSeconds(seconds);
-                value.setMtimeNseconds(nseconds);
-            }
-
-            return value;
-        });
         SETATTR3res setattr3res = null;
 
         Optional<Inode> inodeOptional = MyRocksDB.getINodeMetaData(
@@ -669,10 +632,49 @@ public class Nfsv3Server extends AbstractVerticle {
         if (inodeOptional.isPresent()) {
             Inode inode = inodeOptional.get();
 
+            SetAttr3 newAttributes = setattr3args.getNewAttributes();
+            int modeSetIt = newAttributes.getMode().getSetIt();
+            if (modeSetIt != 0) {
+                int mode = newAttributes.getMode().getMode();
+                inode.setMode(mode);
+            }
+            int uidSetIt = newAttributes.getUid().getSetIt();
+            if (uidSetIt != 0) {
+                int uid = newAttributes.getUid().getUid();
+                inode.setUid(uid);
+            }
+            int gidSetIt = newAttributes.getGid().getSetIt();
+            if (gidSetIt != 0) {
+                int gid = newAttributes.getGid().getGid();
+                inode.setGid(gid);
+            }
+            int sizeSetIt = newAttributes.getSize().getSetIt();
+            if (sizeSetIt != 0) {
+                long size = newAttributes.getSize().getSize();
+                inode.setSize(size);
+            }
+            int atimeSetToServerTime = newAttributes.getAtime();
+            int mtimeSetToServerTIme = newAttributes.getMtime();
+            long currentTimeMillis = System.currentTimeMillis();
+            int seconds = (int)(currentTimeMillis / 1000);
+            int nseconds = (int)((currentTimeMillis % 1000) * 1_000_000);
+            if (atimeSetToServerTime != 0) {
+                inode.setAtime(atimeSetToServerTime);
+                inode.setAtimensec(nseconds);
+            }
+            if (mtimeSetToServerTIme != 0) {
+                inode.setMtime(seconds);
+                inode.setMtimensec(nseconds);
+            }
+
             List<Inode.InodeData> list = inode.getInodeData();
             if (list.isEmpty() && inode.getSize() > 0) {
-                createHole(list, Inode.InodeData.newHoleFile(attributes.getSize()), inode);
+                createHole(list, Inode.InodeData.newHoleFile(newAttributes.getSize().getSize()), inode);
             }
+
+            MyRocksDB.saveINodeMetaData(MetaKeyUtils.getTargetVnodeId(BUCK_NAME), inode);
+
+            FAttr3 attributes = inode.toFAttr3();
 
             PreOpAttr before = PreOpAttr.builder().attributesFollow(0).build();
             PostOpAttr after = PostOpAttr.builder()
@@ -1291,15 +1293,7 @@ public class Nfsv3Server extends AbstractVerticle {
                 MyRocksDB.saveChunkFileMetaData(chunkKey, chunkFile);
             }
 
-            FAttr3 attritbutes = inodeIdToFAttr3.computeIfPresent(inodeId, (key, value) -> {
-                synchronized (value) {
-                    long used = inode.getSize() / BLOCK_SIZE * BLOCK_SIZE + BLOCK_SIZE;
-                    value.setSize(inode.getSize());
-                    value.setUsed(used);
-                }
-                return value;
-            });
-
+            FAttr3 attritbutes = inode.toFAttr3();
 
             PreOpAttr before = PreOpAttr.builder().attributesFollow(0).build();
             PostOpAttr after = PostOpAttr.builder().attributesFollow(1).attributes(attritbutes).build();
@@ -1374,8 +1368,10 @@ public class Nfsv3Server extends AbstractVerticle {
         // Object attributes
         // Determine file type based on name
 
-        // 将元数据持久化存储到RocksDB中
-         CREATE3res create3res = null;
+        int permission = createMode; // Extract permission bits (lower 9 bits)
+        int mode = Inode.Mode.S_IFREG.getCode() | permission;
+
+        CREATE3res create3res = null;
         try {
             String dir = "";
             if (parentInodeOptional.isPresent()) {
@@ -1391,7 +1387,7 @@ public class Nfsv3Server extends AbstractVerticle {
                 String targetVnodeId = MetaKeyUtils.getTargetVnodeId(bucket);
                 String object = PathUtils.combine(dir, name);
                 
-                Inode inode = MyRocksDB.saveIndexMetaAndInodeData(targetVnodeId, bucket, object, 0, "application/octet-stream", 12345).orElseThrow(() -> new RuntimeException("no such inode.."));
+                Inode inode = MyRocksDB.saveIndexMetaAndInodeData(targetVnodeId, bucket, object, 0, "application/octet-stream", mode).orElseThrow(() -> new RuntimeException("no such inode.."));
 
                 byte[] fileHandle = NFSFileHandle.builder().inodeId(inode.getNodeId()).fsid(dirFileHandle.getFsid()).build().toHexArray();
 
@@ -1408,6 +1404,8 @@ public class Nfsv3Server extends AbstractVerticle {
                         .build();
 
                 FAttr3 attributes = inode.toFAttr3();
+                attributes.setFsidMajor(0);
+                attributes.setFsidMinor((int) dirFileHandle.getFsid());
                 PostOpAttr ojbAttributes = PostOpAttr.builder().attributesFollow(1).attributes(attributes).build();
 
                 PreOpAttr before = PreOpAttr.builder().attributesFollow(0).build();
@@ -1828,6 +1826,195 @@ public class Nfsv3Server extends AbstractVerticle {
         fullResponseBuffer.order(ByteOrder.BIG_ENDIAN);
         fullResponseBuffer.putInt(recordMarkValue);
         fullResponseBuffer.put(rpcBodyBuffer.array());
+        fullResponseBuffer.put(rpcNfsBuffer.array());
+
+        return fullResponseBuffer.array();
+    }
+
+        private byte[] createNfsRemoveReply(int xid, Buffer request, int startOffset) throws IOException {
+        // Parse directory file handle and name from request
+        int dirFhandleLength = request.getInt(startOffset);
+        byte[] dirFhandle = request.slice(startOffset + 4, startOffset + 4 + dirFhandleLength).getBytes();
+        int nameLength = request.getInt(startOffset + 4 + dirFhandleLength);
+        String name = request.slice(startOffset + 4 + dirFhandleLength + 4,
+                startOffset + 4 + dirFhandleLength + 4 + nameLength).toString("UTF-8");
+
+        // Create reply
+        final int rpcHeaderLength = RpcConstants.RPC_ACCEPTED_REPLY_HEADER_LENGTH;
+        ByteBuffer rpcHeaderBuffer = RpcUtil.createAcceptedSuccessReplyHeaderBuffer(xid);
+
+        NFSFileHandle dirNfsFileHandle = NFSFileHandle.fromHexArray(dirFhandle);
+        Optional<Inode> dirInodeOptional = MyRocksDB.getINodeMetaData(
+                MetaKeyUtils.getTargetVnodeId(BUCK_NAME),
+                BUCK_NAME,
+                dirNfsFileHandle.getInodeId());
+
+        REMOVE3res rmdir3res = null;
+        try {
+            String dir = "";
+            if (dirInodeOptional.isPresent()) {
+                Inode parentInode = dirInodeOptional.get();
+                dir = parentInode.getObjName();
+            }
+
+            if (dirNfsFileHandle.getInodeId() == 1L) {
+                dir = "/";
+            }
+
+            if (dir.length() > 0) {
+                String object = PathUtils.combine(dir, name);
+                String targetVnodeId = MetaKeyUtils.getTargetVnodeId(BUCK_NAME);
+                Optional<VersionIndexMetadata> vOptional = MyRocksDB.getIndexMetaData(
+                        targetVnodeId,
+                        BUCK_NAME,
+                        object);
+                if (vOptional.isPresent()) {
+                    long inodeId = vOptional.get().getInode();
+                    Inode inode = MyRocksDB.getINodeMetaData(targetVnodeId, BUCK_NAME, inodeId).orElseThrow(() -> new org.rocksdb.RocksDBException("Could not find Inode for " + BUCK_NAME));
+
+                    List<Inode.InodeData> list = inode.getInodeData();
+
+                    for (Inode.InodeData inodeData : list) {
+                        if (inodeData.fileName.startsWith(ROCKS_CHUNK_FILE_KEY)) {
+                            String chunkKey = ChunkFile.getChunkKeyFromChunkFileName(inode.getBucket(), inodeData.fileName);
+                            ChunkFile chunkFile = MyRocksDB.getChunkFileMetaData(chunkKey).orElseThrow(() -> new org.rocksdb.RocksDBException("Could not find chunkFile for " + chunkKey));
+                            
+                            List<Inode.InodeData> chunkList = chunkFile.getChunkList();
+                            for (Inode.InodeData realData : chunkList) {
+                                MyRocksDB.deleteFile(realData.fileName);
+                            }
+
+                            MyRocksDB.deleteChunkFileMetaData(chunkKey);
+                        }
+                    }
+
+                    MyRocksDB.deleteAllMetadata(targetVnodeId, BUCK_NAME, object, vOptional.get().getStamp());
+
+                    PreOpAttr before = PreOpAttr.builder().attributesFollow(0).build();
+                    PostOpAttr after = PostOpAttr.builder().attributesFollow(0).build();
+                    WccData dirWcc = WccData.builder().before(before).after(after).build();
+
+                    REMOVE3resok rmdir3resok = REMOVE3resok.builder().dirWcc(dirWcc).build();
+                    rmdir3res = REMOVE3res.createOk(rmdir3resok);
+                } else {
+                    PreOpAttr before = PreOpAttr.builder().attributesFollow(0).build();
+                    PostOpAttr after = PostOpAttr.builder().attributesFollow(0).build();
+                    WccData dirWcc = WccData.builder().before(before).after(after).build();
+                    REMOVE3resfail rmdir3resfail = REMOVE3resfail.builder().dirWcc(dirWcc).build();
+                    rmdir3res = REMOVE3res.createFail(NfsStat3.NFS3ERR_NOENT, rmdir3resfail);
+                }
+            } else {
+                PreOpAttr before = PreOpAttr.builder().attributesFollow(0).build();
+                PostOpAttr after = PostOpAttr.builder().attributesFollow(0).build();
+                WccData dirWcc = WccData.builder().before(before).after(after).build();
+                REMOVE3resfail rmdir3resfail = REMOVE3resfail.builder().dirWcc(dirWcc).build();
+                rmdir3res = REMOVE3res.createFail(NfsStat3.NFS3ERR_IO, rmdir3resfail);
+            }
+        } catch (Exception e) {
+            PreOpAttr before = PreOpAttr.builder().attributesFollow(0).build();
+            PostOpAttr after = PostOpAttr.builder().attributesFollow(0).build();
+            WccData dirWcc = WccData.builder().before(before).after(after).build();
+            REMOVE3resfail rmdir3resfail = REMOVE3resfail.builder().dirWcc(dirWcc).build();
+            rmdir3res = REMOVE3res.createFail(NfsStat3.NFS3ERR_IO, rmdir3resfail);
+        }
+
+        int rpcNfsLength = rmdir3res.getSerializedSize();
+        ByteBuffer rpcNfsBuffer = ByteBuffer.allocate(rpcNfsLength);
+        rpcNfsBuffer.order(ByteOrder.BIG_ENDIAN);
+        rmdir3res.serialize(rpcNfsBuffer);
+
+        // Record marking
+        int recordMarkValue = 0x80000000 | (rpcHeaderLength + rpcNfsLength);
+
+        ByteBuffer fullResponseBuffer = ByteBuffer.allocate(4 + rpcHeaderLength + rpcNfsLength);
+        fullResponseBuffer.order(ByteOrder.BIG_ENDIAN);
+        fullResponseBuffer.putInt(recordMarkValue);
+        fullResponseBuffer.put(rpcHeaderBuffer.array());
+        fullResponseBuffer.put(rpcNfsBuffer.array());
+
+        return fullResponseBuffer.array();
+    }
+
+    private byte[] createNfsRmdirReply(int xid, Buffer request, int startOffset) throws IOException {
+        // Parse directory file handle and name from request
+        int dirFhandleLength = request.getInt(startOffset);
+        byte[] dirFhandle = request.slice(startOffset + 4, startOffset + 4 + dirFhandleLength).getBytes();
+        int nameLength = request.getInt(startOffset + 4 + dirFhandleLength);
+        String name = request.slice(startOffset + 4 + dirFhandleLength + 4,
+                startOffset + 4 + dirFhandleLength + 4 + nameLength).toString("UTF-8");
+
+        // Create reply
+        final int rpcHeaderLength = RpcConstants.RPC_ACCEPTED_REPLY_HEADER_LENGTH;
+        ByteBuffer rpcHeaderBuffer = RpcUtil.createAcceptedSuccessReplyHeaderBuffer(xid);
+
+        NFSFileHandle dirNfsFileHandle = NFSFileHandle.fromHexArray(dirFhandle);
+        Optional<Inode> dirInodeOptional = MyRocksDB.getINodeMetaData(
+                MetaKeyUtils.getTargetVnodeId(BUCK_NAME),
+                BUCK_NAME,
+                dirNfsFileHandle.getInodeId());
+
+        REMOVE3res rmdir3res = null;
+        try {
+            String dir = "";
+            if (dirInodeOptional.isPresent()) {
+                Inode parentInode = dirInodeOptional.get();
+                dir = parentInode.getObjName();
+            }
+
+            if (dirNfsFileHandle.getInodeId() == 1L) {
+                dir = "/";
+            }
+
+            if (dir.length() > 0) {
+                String object = PathUtils.combine(dir, name);
+                String targetVnodeId = MetaKeyUtils.getTargetVnodeId(BUCK_NAME);
+                Optional<VersionIndexMetadata> vOptional = MyRocksDB.getIndexMetaData(
+                        targetVnodeId,
+                        BUCK_NAME,
+                        object);
+                if (vOptional.isPresent()) {
+                    MyRocksDB.deleteAllMetadata(targetVnodeId, BUCK_NAME, object, vOptional.get().getStamp());
+
+                    PreOpAttr before = PreOpAttr.builder().attributesFollow(0).build();
+                    PostOpAttr after = PostOpAttr.builder().attributesFollow(0).build();
+                    WccData dirWcc = WccData.builder().before(before).after(after).build();
+
+                    REMOVE3resok rmdir3resok = REMOVE3resok.builder().dirWcc(dirWcc).build();
+                    rmdir3res = REMOVE3res.createOk(rmdir3resok);
+                } else {
+                    PreOpAttr before = PreOpAttr.builder().attributesFollow(0).build();
+                    PostOpAttr after = PostOpAttr.builder().attributesFollow(0).build();
+                    WccData dirWcc = WccData.builder().before(before).after(after).build();
+                    REMOVE3resfail rmdir3resfail = REMOVE3resfail.builder().dirWcc(dirWcc).build();
+                    rmdir3res = REMOVE3res.createFail(NfsStat3.NFS3ERR_NOENT, rmdir3resfail);
+                }
+            } else {
+                PreOpAttr before = PreOpAttr.builder().attributesFollow(0).build();
+                PostOpAttr after = PostOpAttr.builder().attributesFollow(0).build();
+                WccData dirWcc = WccData.builder().before(before).after(after).build();
+                REMOVE3resfail rmdir3resfail = REMOVE3resfail.builder().dirWcc(dirWcc).build();
+                rmdir3res = REMOVE3res.createFail(NfsStat3.NFS3ERR_IO, rmdir3resfail);
+            }
+        } catch (Exception e) {
+            PreOpAttr before = PreOpAttr.builder().attributesFollow(0).build();
+            PostOpAttr after = PostOpAttr.builder().attributesFollow(0).build();
+            WccData dirWcc = WccData.builder().before(before).after(after).build();
+            REMOVE3resfail rmdir3resfail = REMOVE3resfail.builder().dirWcc(dirWcc).build();
+            rmdir3res = REMOVE3res.createFail(NfsStat3.NFS3ERR_IO, rmdir3resfail);
+        }
+
+        int rpcNfsLength = rmdir3res.getSerializedSize();
+        ByteBuffer rpcNfsBuffer = ByteBuffer.allocate(rpcNfsLength);
+        rpcNfsBuffer.order(ByteOrder.BIG_ENDIAN);
+        rmdir3res.serialize(rpcNfsBuffer);
+
+        // Record marking
+        int recordMarkValue = 0x80000000 | (rpcHeaderLength + rpcNfsLength);
+
+        ByteBuffer fullResponseBuffer = ByteBuffer.allocate(4 + rpcHeaderLength + rpcNfsLength);
+        fullResponseBuffer.order(ByteOrder.BIG_ENDIAN);
+        fullResponseBuffer.putInt(recordMarkValue);
+        fullResponseBuffer.put(rpcHeaderBuffer.array());
         fullResponseBuffer.put(rpcNfsBuffer.array());
 
         return fullResponseBuffer.array();
