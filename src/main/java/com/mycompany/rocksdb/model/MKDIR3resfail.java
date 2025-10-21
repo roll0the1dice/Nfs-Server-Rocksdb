@@ -1,9 +1,13 @@
 package com.mycompany.rocksdb.model;
 
 import io.vertx.core.buffer.Buffer;
+import lombok.Builder;
+import lombok.Data;
 
 import java.nio.ByteBuffer;
 
+@Data
+@Builder
 public class MKDIR3resfail implements SerializablePayload {
   private WccData dirWcc;
 

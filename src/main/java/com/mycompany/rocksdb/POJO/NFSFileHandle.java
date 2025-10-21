@@ -5,27 +5,32 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.Objects;
 
+import lombok.Builder;
+import lombok.Data;
+
 /**
  * 一个全功能的NFS文件句柄类。
  * 采用统一的28字节格式，直接包含 Inode 和 FSID。
  * 格式: Header (12 bytes) + Inode (8 bytes) + FSID (8 bytes)
  */
+@Data
+@Builder
 public final class NFSFileHandle {
 
     // --- 常量 ---
     private static final int HANDLE_LENGTH_BYTES = 28;
 
     // --- 实例字段 ---
-    private final long ino;
+    private final long inodeId;
     private final long fsid;
 
     public NFSFileHandle(long ino, long fsid) {
-        this.ino = ino;
+        this.inodeId = ino;
         this.fsid = fsid;
     }
 
     // --- Getters ---
-    public long getIno() { return ino; }
+    public long getInodeId() { return inodeId; }
     public long getFsid() { return fsid; }
 
     // --- 编码方法 ---
@@ -43,12 +48,33 @@ public final class NFSFileHandle {
         buffer.putInt(0x00000000);
 
         // 写入8字节的 Inode Number
-        buffer.putLong(this.ino);
+        buffer.putLong(this.inodeId);
 
         // 写入8字节的 Filesystem ID
         buffer.putLong(this.fsid);
 
         return bytesToHexString(buffer.array());
+    }
+
+        /**
+     * 将当前对象编码为统一的28字节十六进制句柄字符串。
+     * @return 56个字符的十六进制文件句柄。
+     */
+    public byte[] toHexArray() {
+        ByteBuffer buffer = ByteBuffer.allocate(HANDLE_LENGTH_BYTES).order(ByteOrder.BIG_ENDIAN);
+
+        // 写入12字节的固定头部
+        buffer.putInt(0x01000701);
+        buffer.putInt(0x02000002);
+        buffer.putInt(0x00000000);
+
+        // 写入8字节的 Inode Number
+        buffer.putLong(this.inodeId);
+
+        // 写入8字节的 Filesystem ID
+        buffer.putLong(this.fsid);
+
+        return buffer.array();
     }
 
     // --- 解码方法 ---
@@ -126,18 +152,18 @@ public final class NFSFileHandle {
     // --- 标准 Object 方法 (未改变) ---
     @Override
     public String toString() {
-        return "NFSFileHandle{" + "ino=" + ino + ", fsid=" + fsid + '}';
+        return "NFSFileHandle{" + "ino=" + inodeId + ", fsid=" + fsid + '}';
     }
     @Override
     public boolean equals(Object o) {
         if (this == o) return true;
         if (o == null || getClass() != o.getClass()) return false;
         NFSFileHandle that = (NFSFileHandle) o;
-        return ino == that.ino && fsid == that.fsid;
+        return inodeId == that.inodeId && fsid == that.fsid;
     }
     @Override
     public int hashCode() {
-        return Objects.hash(ino, fsid);
+        return Objects.hash(inodeId, fsid);
     }
 
     public static void main(String[] args) {

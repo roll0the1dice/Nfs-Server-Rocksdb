@@ -975,6 +975,9 @@ public class MyRocksDB {
             inode.setCtimensec(nseconds);
             inode.setSize(contentLength);
             inode.setMode(mode);
+            if (mode == 16893) {
+                //inode.setSize(4096);
+            }
 
 
             versionIndexMetadata.get().setInode(inode.getNodeId());

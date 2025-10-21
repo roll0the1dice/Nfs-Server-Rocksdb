@@ -7,6 +7,8 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.mycompany.rocksdb.enums.FType3;
+import com.mycompany.rocksdb.model.FAttr3;
 import com.mycompany.rocksdb.utils.VersionUtil;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -21,6 +23,7 @@ import java.util.*;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 
+import static com.mycompany.rocksdb.constant.GlobalConstant.BLOCK_SIZE;
 import static com.mycompany.rocksdb.constant.GlobalConstant.ROCKS_INODE_PREFIX;
 
 @Data
@@ -86,6 +89,27 @@ public class Inode {
     List<ChunkFile> updatedChunkFile;
 
     public static Inode RETRY_INODE = Inode.builder().linkN(-3).build();
+
+    public static enum Mode {
+        S_IFMT(0xF000), // 文件类型掩码
+        S_IFSOCK(0xC000), // 套接字
+        S_IFLNK(0xA000), // 符号链接
+        S_IFREG(0x8000), // 普通文件
+        S_IFBLK(0x6000), // 块设备
+        S_IFDIR(0x4000), // 目录
+        S_IFCHR(0x2000), // 字符设备
+        S_IFIFO(0x1000); // 命名管道
+
+        private final int code;
+
+        Mode(int code) {
+            this.code = code;
+        }
+
+        public int getCode() {
+            return code;
+        }
+    }
 
     public Inode clone() {
         return  Inode.builder()
@@ -195,22 +219,28 @@ public class Inode {
                 .build();
     }
 
+    public FAttr3 toFAttr3() {
+        return FAttr3.builder()
+        .type(mode >> 12 == 4 ? FType3.NF3DIR.getCode() : FType3.NF3REG.getCode())
+        .mode(mode & 0xFFF)
+        .nlink(linkN)
+        .uid(uid)
+        .gid(gid)
+        .size(size)
+        .used((size + BLOCK_SIZE - 1) / BLOCK_SIZE * BLOCK_SIZE)
+        .fsidMajor(majorDev)
+        .fsidMinor(minorDev)
+        .rdev(0)
+        .fileid(nodeId)
+        .atimeSeconds((int)atime)
+        .atimeNseconds((int)atimensec)
+        .mtimeSeconds((int)mtime)
+        .mtimeNseconds((int)mtimensec)
+        .ctimeSeconds((int)ctime)
+        .ctimeNseconds(ctimensec)
+        .build();
+    }
 
-
-//    public List<InodeData> cloneInodeData(List<InodeData> inodeData) {
-//        List<InodeData> newInodeData = new LinkedList<>();
-//        for (InodeData data : inodeData) {
-//            InodeData inodeData0 = new InodeData();
-//            inodeData0.setFileName(data.getFileName());
-//            inodeData0.setSize(data.getSize());
-//            inodeData0.setStorage(data.getStorage());
-//            inodeData0.setOffset(data.getOffset());
-//            inodeData0.setEtag(data.getEtag());
-//            inodeData0.setChunkNum(data.getChunkNum());
-//            newInodeData.add(inodeData0);
-//        }
-//        return newInodeData;
-//    }
     public static void partialOverwrite(ChunkFile chunkFile, long coverOffset, Inode.InodeData updatedData) {
     ListIterator<Inode.InodeData> it = chunkFile.chunkList.listIterator();
 

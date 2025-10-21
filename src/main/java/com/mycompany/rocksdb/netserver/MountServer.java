@@ -1,6 +1,7 @@
 package com.mycompany.rocksdb.netserver;
 
 import com.mycompany.rocksdb.DTO.MOUNT3args;
+import com.mycompany.rocksdb.POJO.NFSFileHandle;
 import com.mycompany.rocksdb.RPC.RpcHeader;
 import com.mycompany.rocksdb.enums.MountProcedure;
 import com.mycompany.rocksdb.enums.MountStatus;
@@ -293,9 +294,10 @@ public class MountServer extends AbstractVerticle {
                 rpcMountBuffer.putInt(0x0000001C); // File handle length
                 // Create a file handle using the provided format
                 // Format from the provided hex dump:
-                // 01 00 07 00 02 00 00 02 00 00 00 00 3e 3e 7d ae 34 c9 47 18 96 e6 21 85 74 c9 81 10
-                String dataLiteral = "0100070002000002000000003e3e7dae34c9471896e6218574c98110";
-                rpcMountBuffer.put(NetTool.hexStringToByteArray(dataLiteral));
+                // 01 00 07 00 02 00 00 02 00 00 00 00 01 3e 7d ae 34 c9 47 18 96 e6 21 85 74 c9 81 10
+                NFSFileHandle nfsFileHandle = NFSFileHandle.builder().fsid(1).inodeId(1).build();
+                //String dataLiteral = "0100070002000002000000003e3e7dae34c9471896e6218574c98110";
+                rpcMountBuffer.put(nfsFileHandle.toHexArray());
 
                 rpcMountBuffer.putInt(MOUNT_FLAVORS);
                 rpcMountBuffer.putInt(MOUNT_FLAVOR_AUTH_UNIX);
