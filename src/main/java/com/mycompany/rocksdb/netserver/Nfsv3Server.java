@@ -3,6 +3,7 @@ package com.mycompany.rocksdb.netserver;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.mycompany.rocksdb.POJO.ChunkFile;
 import com.mycompany.rocksdb.POJO.Inode;
+import com.mycompany.rocksdb.POJO.NFSFileHandle;
 import com.mycompany.rocksdb.POJO.FileMetadata;
 import com.mycompany.rocksdb.POJO.VersionIndexMetadata;
 import com.mycompany.rocksdb.RPC.RpcHeader;
@@ -578,6 +579,8 @@ public class Nfsv3Server extends AbstractVerticle {
         final int rpcHeaderLength = RpcConstants.RPC_ACCEPTED_REPLY_HEADER_LENGTH;
         ByteBuffer rpcHeaderBuffer = RpcUtil.createAcceptedSuccessReplyHeaderBuffer(xid);
 
+        NFSFileHandle nfsFileHandle = NFSFileHandle.fromHexArray(fhandle);
+
         long fileId = fileHandleToFileId.getOrDefault(new ByteArrayKeyWrapper(fhandle), Long.valueOf(0x0000000002000002L));
         String filename = fileIdToFileName.getOrDefault(Optional.of(fileId), "/");
         int fileType = getFileType(filename);
@@ -1021,7 +1024,7 @@ public class Nfsv3Server extends AbstractVerticle {
             if (!list.isEmpty()) {
                 Inode.InodeData last = list.get(list.size() - 1);
                 String chunkKey = ChunkFile.getChunkKeyFromChunkFileName(inode.getBucket(), last.fileName);
-                ChunkFile chunkFile = MyRocksDB.getChunkFileMetaData(chunkKey).orElseThrow(() -> new RuntimeException("chunk file not found..."));
+                ChunkFile chunkFile = MyRocksDB.getChunkFileMetaData(chunkKey).orElseThrow(() -> new RuntimeException("chunk file not found for chunkKey: " + chunkKey));
 
                 List<Inode.InodeData> overlappingDataSegments = partialRead(chunkFile, readOffset, count);
 
@@ -1102,8 +1105,8 @@ public class Nfsv3Server extends AbstractVerticle {
         return fullResponseBuffer.array();
     }
 
-    private List<byte[]> readSegment(List<Long> offsets, List<Long> lens, long size) throws IOException {
-        if (!SAVE_DATA_PATH.toFile().exists()) {
+    public static List<byte[]> readSegment(List<Long> offsets, List<Long> lens, long size) throws IOException {
+        if (!Paths.get(MyRocksDB.FILE_DATA_DEVICE_PATH).toFile().exists()) {
             log.error("No such path exists...");
             throw new IOException("No such path exists...");
         }
@@ -1114,7 +1117,7 @@ public class Nfsv3Server extends AbstractVerticle {
             long offset = offsets.get(i);
             long length = lens.get(i);
 
-            try(FileChannel fileChannel = FileChannel.open(SAVE_DATA_PATH, StandardOpenOption.READ)) {
+            try(FileChannel fileChannel = FileChannel.open(Paths.get(MyRocksDB.FILE_DATA_DEVICE_PATH), StandardOpenOption.READ)) {
                 ByteBuffer buffer = ByteBuffer.allocate((int)length);
                 fileChannel.read(buffer, offset);
                 buffer.flip();
@@ -1130,7 +1133,9 @@ public class Nfsv3Server extends AbstractVerticle {
 
     public static void createData(List<Inode.InodeData> list, Inode.InodeData data, Inode inode, byte[] dataToWrite) throws JsonProcessingException {
         // 把普通 inodeData 转换为 chunk
-        String chunkKey = ChunkFile.getChunkKey(data.fileName);
+        String targetVnodeId = MetaKeyUtils.getTargetVnodeId(inode.getBucket());
+
+        String chunkKey = ChunkFile.getChunkKey(targetVnodeId, data.fileName);
         Inode.InodeData chunk = ChunkFile.newChunk(data.fileName, data, inode);
         ChunkFile chunkFile = ChunkFile.builder().nodeId(inode.getNodeId()).bucket(inode.getBucket()).objName(inode.getObjName())
                 .versionId(inode.getVersionId()).versionNum(MetaKeyUtils.getVersionNum()).size(data.size).chunkList(new ArrayList<>()).hasDeleteFiles(new LinkedList<>()).build();
@@ -1141,10 +1146,12 @@ public class Nfsv3Server extends AbstractVerticle {
         chunkFile.setSize(data.size);
         inode.setSize(data.size);
 
-        String targetVnodeId = MetaKeyUtils.getTargetVnodeId(inode.getBucket());
         MyRocksDB.saveINodeMetaData(targetVnodeId, inode);
         // 关联 - chunkKey - chunk - chunkFile
         MyRocksDB.saveChunkFileMetaData(chunkKey, chunkFile);
+
+        String verisonKey = MetaKeyUtils.getVersionMetaDataKey(targetVnodeId, inode.getBucket(), inode.getObjName(), null);
+        MyRocksDB.saveFileMetaData(data.fileName, verisonKey, dataToWrite, dataToWrite.length, true);
     }
 
     public static void createHole(List<Inode.InodeData> list, Inode.InodeData holeFile, Inode inode) throws JsonProcessingException {
@@ -1166,8 +1173,8 @@ public class Nfsv3Server extends AbstractVerticle {
         MyRocksDB.saveChunkFileMetaData(chunkKey, chunkFile);
     }
 
-    if (list.isEmpty()) {
-            public static void appendData(List<Inode.InodeData> list, Inode.InodeData data, Inode inode, byte[] dataToWrite) throws JsonProcessingException {
+    public static void appendData(List<Inode.InodeData> list, Inode.InodeData data, Inode inode, byte[] dataToWrite) throws JsonProcessingException {
+        if (list.isEmpty()) {
             if (StringUtils.isBlank(data.fileName)) {
                 createHole(list ,data, inode);
             } else {
@@ -1188,8 +1195,8 @@ public class Nfsv3Server extends AbstractVerticle {
                 // String s_uuid = "0001";
                 // MyRocksDB.saveRedis(vnodeId, link, s_uuid);
 
-                //String verisonKey = MetaKeyUtils.getVersionMetaDataKey(targetVnodeId, inode.getBucket(), inode.getObjName(), null);
-                MyRocksDB.saveFileMetaData(targetVnodeId, inode.getBucket(), inode.getObjName(), inode.getVersionId(), dataToWrite, dataToWrite.length, true);
+                String verisonKey = MetaKeyUtils.getVersionMetaDataKey(targetVnodeId, inode.getBucket(), inode.getObjName(), null);
+                MyRocksDB.saveFileMetaData(data.fileName, verisonKey, dataToWrite, dataToWrite.length, true);
             }
 
             last.setSize(last.getSize() + data.size);
@@ -1276,8 +1283,8 @@ public class Nfsv3Server extends AbstractVerticle {
                 // MyRocksDB.saveRedis(vnodeId, link, s_uuid);
 
                 String targetVnodeId = MetaKeyUtils.getTargetVnodeId(inode.getBucket());
-                //String verisonKey = MetaKeyUtils.getVersionMetaDataKey(targetVnodeId, inode.getBucket(), inode.getObjName(), inode.getVersionId());
-                MyRocksDB.saveFileMetaData(targetVnodeId, inode.getBucket(), inode.getObjName(), inode.getVersionId(), dataToWrite, dataToWrite.length, true);
+                String verisonKey = MetaKeyUtils.getVersionMetaDataKey(targetVnodeId, inode.getBucket(), inode.getObjName(), inode.getVersionId());
+                MyRocksDB.saveFileMetaData(inodeData.fileName, verisonKey, dataToWrite, dataToWrite.length, true);
 
                 chunkFile.setSize(chunkFile.getSize() + updatedtotalSize);
                 inode.setSize(chunkFile.getSize() + updatedtotalSize);
@@ -1460,7 +1467,7 @@ public class Nfsv3Server extends AbstractVerticle {
             String targetVnodeId = MetaKeyUtils.getTargetVnodeId(bucket);
             String object = name;
             String filename = MetaKeyUtils.getObjFileName(bucket, object, requestId);
-            Inode inode = MyRocksDB.saveIndexMetaAndInodeData(targetVnodeId, bucket, object, filename, 0, "text/plain", true, 12345).orElseThrow(() -> new RuntimeException("no such inode.."));
+            Inode inode = MyRocksDB.saveIndexMetaAndInodeData(targetVnodeId, bucket, object, 0, "text/plain", 12345).orElseThrow(() -> new RuntimeException("no such inode.."));
 
             fileHandleToINode.put(new ByteArrayKeyWrapper(fileHandle), inode);
             //myRocksDB.saveINodeMetaData(targetVnodeId, inode);

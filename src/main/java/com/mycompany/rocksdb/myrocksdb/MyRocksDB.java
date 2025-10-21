@@ -60,9 +60,9 @@ public class MyRocksDB {
 
     public static final Map<String, Map<String, ColumnFamilyHandle>> cfHandleMap = new ConcurrentHashMap<>();
 
-    public static final String INDEX_LUN = "fs-SP0-14-index";
+    public static final String INDEX_LUN = "fs-SP0-0-index";
     
-    public static final String DATA_LUN = "fs-SP0-9";
+    public static final String DATA_LUN = "fs-SP0-0";
 
     public static final String FILE_DATA_DEVICE_PATH = "dev$sdb1"; // Placeholder for the actual block device path
 
@@ -130,6 +130,14 @@ public class MyRocksDB {
 
     public void put(ColumnFamilyHandle columnFamilyHandle, byte[] key, byte[] value) throws RocksDBException {
         rocksDB.put(columnFamilyHandle, key, value);
+    }
+
+    public void delete(byte[] key) throws RocksDBException {
+        rocksDB.delete(key);
+    }
+
+    public void delete(ColumnFamilyHandle columnFamilyHandle, byte[] key) throws RocksDBException {
+        rocksDB.delete(columnFamilyHandle, key);
     }
 
     public void close() {
@@ -276,11 +284,11 @@ public class MyRocksDB {
             long blockSize = 4096; // 4KB块大小
 
             if (lun.equals(INDEX_LUN)) {
-                totalSize = 1000000000; // 10MB for index LUN
+                totalSize = 100000000000L; // 10MB for index LUN
             } else if (lun.equals(DATA_LUN)) {
-                totalSize = 1000000000; // 100MB for data LUN
+                totalSize = 100000000000L; // 100MB for data LUN
             } else {
-                totalSize = 500000000; // 默认50MB
+                totalSize = 100000000000L; // 默认50MB
             }
 
             logger.info("为LUN {} 创建RealRocksDBIntegration实例: totalSize={}, blockSize={}",
@@ -692,10 +700,8 @@ public class MyRocksDB {
         }
     }
 
-    public static long saveFileMetaData(String targetVnodeId, String bucket, String object, String versionId, byte[] dataToWrite, long count, boolean isCreated) {
+    public static long saveFileMetaData(String filename, String versionKey, byte[] dataToWrite, long count, boolean isCreated) {
         ObjectMapper objectMapper = new ObjectMapper();
-
-        String versionKey = MetaKeyUtils.getVersionMetaDataKey(targetVnodeId, bucket, object,versionId);
 
         String lun = INDEX_LUN;
         Path destinationPath = Paths.get(FILE_DATA_DEVICE_PATH);
@@ -719,10 +725,10 @@ public class MyRocksDB {
         }
 
         // 写入File数据
-        String fileMetaKey = MetaKeyUtils.getFileMetaKey(object);
+        String fileMetaKey = MetaKeyUtils.getFileMetaKey(filename);
         // 写入文件数据
         try {
-            byte[] value = db.get(fileMetaKey.getBytes(StandardCharsets.UTF_8));
+            byte[] value = db.get(filename.getBytes(StandardCharsets.UTF_8));
             Optional<FileMetadata> fileMetadata = Optional.empty();
             long fileOffset = 0;
             long len = 0;
@@ -761,7 +767,7 @@ public class MyRocksDB {
                 long numBlocks = (count + BLOCK_SIZE - 1) / BLOCK_SIZE; // 向上取整
                 JavaAllocator.Result[] results = db.allocate(numBlocks);
                 if (results.length == 0) {
-                    throw new RuntimeException("无法分配足够的逻辑空间");
+                    throw new RuntimeException("could not allocate enough space");
                 }
 
                 fileOffset = results[0].offset * BLOCK_SIZE;
@@ -784,7 +790,7 @@ public class MyRocksDB {
 
                 String eTag = calculateETag(dataToWrite);
 
-                fileMetadata = Optional.of(FileMetadata.builder().fileName(object).etag(eTag).size(count).bucket(bucket).vnodeId(targetVnodeId)
+                fileMetadata = Optional.of(FileMetadata.builder().fileName(fileMetaKey).etag(eTag).size(count)
                         .metaKey(versionKey).offset(Arrays.asList(fileOffset)).len(Arrays.asList(len)).lun(lun).build());
             }   
 
@@ -852,8 +858,8 @@ public class MyRocksDB {
         try {
             ObjectMapper objectMapper = new ObjectMapper();
 
-            String lun = DATA_LUN;
-            Path path = Paths.get(DATA_LUN);
+            String lun = INDEX_LUN;
+            Path path = Paths.get(INDEX_LUN);
 
             if (!path.toFile().exists()) {
                 System.out.println("ERROR: device does not exist!");
@@ -874,12 +880,40 @@ public class MyRocksDB {
         return Optional.empty();
     }
 
-    public static Optional<VersionIndexMetadata> getIndexMetaData(String targetVnodeId, String bucket, String object) {
+
+    public static Optional<FileMetadata> getFileMetaData(String targetVnodeId, String bucketName, String objectName, String requestId) {
         try {
             ObjectMapper objectMapper = new ObjectMapper();
+
             String lun = INDEX_LUN;
-            String versionId = "null";
-            String verisonKey = MetaKeyUtils.getVersionMetaDataKey(targetVnodeId, bucket, object, versionId);
+            Path path = Paths.get(INDEX_LUN);
+
+            if (!path.toFile().exists()) {
+                System.out.println("ERROR: device does not exist!");
+                System.exit(-1);
+            }
+
+            // 写入File数据
+            String fileMetaKey = MetaKeyUtils.getFileMetaKey(targetVnodeId, bucketName, objectName, requestId);
+            // 写入文件数据
+            MyRocksDB db = MyRocksDB.getRocksDB(lun);
+
+            byte[] value = db.get(fileMetaKey.getBytes(StandardCharsets.UTF_8));
+
+            return Optional.of(objectMapper.readValue(value, FileMetadata.class));
+        } catch (Exception e) {
+            logger.error("operate rocksdb fails..", e);
+        }
+        return Optional.empty();
+    }
+
+    public static Optional<VersionIndexMetadata> getIndexMetaData(String targetVnodeId, String bucket, String object) {
+        ObjectMapper objectMapper = new ObjectMapper();
+        String lun = INDEX_LUN;
+        String versionId = "null";
+        String verisonKey = MetaKeyUtils.getVersionMetaDataKey(targetVnodeId, bucket, object, versionId);
+        try {
+
             MyRocksDB db = MyRocksDB.getRocksDB(lun);
             byte[] value = db.get(verisonKey.getBytes(StandardCharsets.UTF_8));
             if (value != null) {
@@ -887,12 +921,12 @@ public class MyRocksDB {
                 return Optional.of(versionIndexMetadata);
             }
         } catch (Exception e) {
-            logger.error("operate rocksdb fails..", e);
+            logger.error("could not read value for verisonKey " + verisonKey, e);
         }
         return Optional.empty();
     }
 
-    public static Optional<Inode> saveIndexMetaAndInodeData(String targetVnodeId, String bucket, String object, String fileName, long contentLength, String contentType, boolean isCreated, int mode) throws JsonProcessingException {
+    public static Optional<Inode> saveIndexMetaAndInodeData(String targetVnodeId, String bucket, String object, long contentLength, String contentType, int mode) {
         ObjectMapper objectMapper = new ObjectMapper();
 
         String lun = INDEX_LUN;
@@ -959,7 +993,10 @@ public class MyRocksDB {
             db.put(iNodeKey.getBytes(StandardCharsets.UTF_8), objectMapper.writeValueAsBytes(inode));
 
             return Optional.of(inode);
-        } catch (Exception e) {
+        } catch (JsonProcessingException e1) {
+            logger.error(e1.getMessage(), e1);
+        }
+        catch (Exception e) {
             logger.error("operate rocksdb fails..", e);
         }
 
@@ -1159,7 +1196,26 @@ public class MyRocksDB {
 
     }
 
-    public static Optional<ChunkFile> getChunkFileMetaData(String chunkFileKey) throws JsonProcessingException {
+    public static void deleteChunkFileMetaData(String chunkFileKey) {
+        ObjectMapper objectMapper = new ObjectMapper();
+
+        String lun = INDEX_LUN;
+        if (chunkFileKey == null || StringUtils.isBlank(chunkFileKey)) {
+            System.out.println("ERROR: device does not exist!");
+            System.exit(-1);
+        }
+
+        try {
+            MyRocksDB db = MyRocksDB.getRocksDB(lun);
+            db.delete(chunkFileKey.getBytes(StandardCharsets.UTF_8));
+
+        } catch (Exception e) {
+            logger.error("operate rocksdb fails..", e);
+        }
+
+    }
+
+    public static Optional<ChunkFile> getChunkFileMetaData(String chunkFileKey) {
         ObjectMapper objectMapper = new ObjectMapper();
 
         String lun = INDEX_LUN;
@@ -1175,7 +1231,10 @@ public class MyRocksDB {
 
             return Optional.of(objectMapper.readValue(value, ChunkFile.class));
 
-        } catch (Exception e) {
+        } catch (JsonProcessingException e2) {
+            logger.error("operate rocksdb fails..", e2);
+        }
+        catch (Exception e) {
             logger.error("operate rocksdb fails..", e);
         }
 
@@ -1201,15 +1260,6 @@ public class MyRocksDB {
             fileMetadataBytes = db.get(fileMetaKey.getBytes(StandardCharsets.UTF_8));
             if (fileMetadataBytes != null) {
                 fileMetadata = objectMapper.readValue(fileMetadataBytes, FileMetadata.class);
-
-                // Extract vnodeId, bucket, object from FileMetadata
-                String targetVnodeId = fileMetadata.getVnodeId();
-                String bucket = fileMetadata.getBucket();
-                String object = fileMetadata.getKey(); // Assuming 'key' in FileMetadata is the object name
-
-                // Call deleteAllMetadata to delete all associated metadata
-                deleteAllMetadata(targetVnodeId, bucket, object);
-
             } else {
                 logger.warn("File metadata not found for deletion: {}. Cannot proceed with metadata deletion and block freeing.", fileName);
                 return; // Cannot proceed without FileMetadata
@@ -1258,7 +1308,7 @@ public class MyRocksDB {
         logger.info("File {} deleted from RocksDB and its allocated space freed.", fileName);
     }
 
-    public static void deleteAllMetadata(String targetVnodeId, String bucket, String object) {
+    public static void deleteAllMetadata(String targetVnodeId, String bucket, String object, long timestamp) {
         String lun = INDEX_LUN;
         if (lun == null || StringUtils.isBlank(lun)) {
             logger.error("ERROR: device does not exist!");
@@ -1277,6 +1327,7 @@ public class MyRocksDB {
             String verisonKey = MetaKeyUtils.getVersionMetaDataKey(targetVnodeId, bucket, object, versionId);
             String latestMetaKey = MetaKeyUtils.getLatestMetaKey(targetVnodeId, bucket, object);
             String metaKey = MetaKeyUtils.getMetaDataKey(targetVnodeId, bucket, object, "") + "0/null";
+            String lifeCycleMetaKey = MetaKeyUtils.getLifeCycleMetaKey(targetVnodeId, bucket, object, versionId, String.valueOf(timestamp));
 
             // To delete the inode, we need its nodeId. This is the tricky part.
             // The saveIndexMetaAndInodeData method creates a new Inode or uses an existing one.
@@ -1290,7 +1341,7 @@ public class MyRocksDB {
             if (versionIndexMetadata.isPresent()) {
                 long inodeId = versionIndexMetadata.get().getInode();
                 String iNodeKey = Inode.getKey(targetVnodeId, bucket, inodeId);
-                db.rocksDB.delete(iNodeKey.getBytes(StandardCharsets.UTF_8));
+                db.delete(iNodeKey.getBytes(StandardCharsets.UTF_8));
                 logger.info("Deleted Inode metadata for vnodeId: {}, bucket: {}, object: {}, inodeId: {}", targetVnodeId, bucket, object, inodeId);
             } else {
                 logger.warn("VersionIndexMetadata not found for vnodeId: {}, bucket: {}, object: {}. Skipping Inode deletion.", targetVnodeId, bucket, object);
@@ -1298,7 +1349,7 @@ public class MyRocksDB {
 
 
             // Delete other metadata
-            db.rocksDB.delete(verisonKey.getBytes(StandardCharsets.UTF_8));
+            db.delete(verisonKey.getBytes(StandardCharsets.UTF_8));
             logger.info("Deleted version metadata for vnodeId: {}, bucket: {}, object: {}", targetVnodeId, bucket, object);
 
             // LifeCycleMetaKey has a timestamp. We need to iterate or adjust how it's stored/deleted.
@@ -1313,11 +1364,14 @@ public class MyRocksDB {
             // So, without the exact timestamp, we can't delete it precisely.
             // A more robust solution would involve fetching all keys with a prefix and deleting.
 
-            db.rocksDB.delete(latestMetaKey.getBytes(StandardCharsets.UTF_8));
+            db.delete(latestMetaKey.getBytes(StandardCharsets.UTF_8));
             logger.info("Deleted latest metadata for vnodeId: {}, bucket: {}, object: {}", targetVnodeId, bucket, object);
 
-            db.rocksDB.delete(metaKey.getBytes(StandardCharsets.UTF_8));
+            db.delete(metaKey.getBytes(StandardCharsets.UTF_8));
             logger.info("Deleted general metadata for vnodeId: {}, bucket: {}, object: {}", targetVnodeId, bucket, object);
+
+            db.delete(lifeCycleMetaKey.getBytes(StandardCharsets.UTF_8));
+            logger.info("Deleted lifeCycle metadata for vnodeId: {}, bucket: {}, object: {}", targetVnodeId, bucket, object);
 
             logger.info("Successfully deleted all associated metadata for vnodeId: {}, bucket: {}, object: {}", targetVnodeId, bucket, object);
 

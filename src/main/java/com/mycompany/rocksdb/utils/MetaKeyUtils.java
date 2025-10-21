@@ -28,36 +28,36 @@ public class MetaKeyUtils {
         if (StringUtils.isEmpty(versionId)) {
             return getMetaDataKey(vnode, bucket, object, null);
         }
-        return ROCKS_VERSION_PREFIX + vnode + File.separator + bucket + File.separator + object + ZERO_STR + versionId;
+        return ROCKS_VERSION_PREFIX + vnode + "/" + bucket + "/" + object + ZERO_STR + versionId;
     }
 
     // -vnode1/mybucket/example.txt
     public static String getLatestMetaKey(String vnode, String bucket, String object) {
 
-        return ROCKS_LATEST_KEY + vnode + File.separator + bucket + File.separator + object;
+        return ROCKS_LATEST_KEY + vnode + "/" + bucket + "/" + object;
     }
 
     // 生成生命周期对应的rocksDB的stamp的key
     // +vnode1/mybucket/1234567890/example.txt/version1
     public static String getLifeCycleMetaKey(String vnode, String bucket, String object, String versionId, String stamp) {
-        return ROCKS_LIFE_CYCLE_PREFIX + vnode + File.separator + bucket + File.separator + stamp + File.separator + object + File.separator + versionId;
+        return ROCKS_LIFE_CYCLE_PREFIX + vnode + "/" + bucket + "/" + stamp + "/" + object + "/" + versionId;
     }
 
     // 不带快照标记时：vnode1/mybucket/example.txt
     // 带快照标记时：vnode1/mybucket/snapshotMark/example.txt
     // 带版本号时：vnode1/mybucket/example.txt/0000000000000/versionId
     public static String getMetaDataKey(String vnode, String bucket, String object, String snapshotMark) {
-        return StringUtils.isBlank(snapshotMark) ? vnode + File.separator + bucket + File.separator + object
-                : vnode + File.separator + bucket + File.separator + snapshotMark + File.separator + object;
+        return StringUtils.isBlank(snapshotMark) ? vnode + "/" + bucket + "/" + object
+                : vnode + "/" + bucket + "/" + snapshotMark + "/" + object;
     }
 
     public static String getMetaDataKey(String vnode, String bucket, String object, String versionId, String stamp) {
-        return vnode + File.separator + bucket + File.separator + object + ZERO_STR + stamp + File.separator + versionId;
+        return vnode + "/" + bucket + "/" + object + ZERO_STR + stamp + "/" + versionId;
     }
 
     public static String getMetaDataKey(String vnode, String bucket, String object, String versionId, String stamp, String snapshotMark) {
         return StringUtils.isBlank(snapshotMark) ? getMetaDataKey(vnode, bucket, object, versionId, stamp)
-                : vnode + File.separator + bucket + File.separator + snapshotMark + File.separator + object + ZERO_STR + File.separator + stamp + File.separator + versionId;
+                : vnode + "/" + bucket + "/" + snapshotMark + "/" + object + ZERO_STR + "/" + stamp + "/" + versionId;
     }
 
     public static String getObjFileName(String bucket, String object, String requestId) {
@@ -66,7 +66,7 @@ public class MetaKeyUtils {
         String objVnode = tuple.getT1();
         String sha1 = tuple.getT2();
 
-        return File.separator + String.join("_",
+        return "/" + String.join("_",
                 new String[]{objVnode,
                         bucket,
                         sha1,
@@ -79,8 +79,13 @@ public class MetaKeyUtils {
     }
 
     // Generate key for file metadata in RocksDB
-    public static String getFileMetaKey(String objectName) {
-        return ROCKS_FILE_META_PREFIX + objectName;
+    public static String getFileMetaKey(String targetVnodeId, String bucketName, String objectName, String requestId) {
+        return ROCKS_FILE_META_PREFIX + targetVnodeId + "_" + bucketName + "_" + objectName + "_" + requestId;
+    }
+
+    // Generate key for file metadata in RocksDB
+    public static String getFileMetaKey(String filename) {
+        return ROCKS_FILE_META_PREFIX + filename;
     }
 
     public static String getRequestId() {
@@ -109,7 +114,7 @@ public class MetaKeyUtils {
 
         String objVnode = tuple.getT1();
 
-        return File.separator + String.join("_",
+        return "/" + String.join("_",
                 new String[]{objVnode,
                         bucket,
                         "",

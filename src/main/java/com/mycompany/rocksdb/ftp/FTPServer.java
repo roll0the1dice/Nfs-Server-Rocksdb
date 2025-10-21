@@ -1,6 +1,11 @@
 package com.mycompany.rocksdb.ftp;
 
+import com.mycompany.rocksdb.POJO.ChunkFile;
+import com.mycompany.rocksdb.POJO.FileMetadata;
+import com.mycompany.rocksdb.POJO.Inode;
 import com.mycompany.rocksdb.POJO.LatestIndexMetadata;
+import com.mycompany.rocksdb.POJO.VersionIndexMetadata;
+import com.mycompany.rocksdb.netserver.Nfsv3Server;
 import io.reactivex.Flowable;
 import io.reactivex.disposables.CompositeDisposable;
 import io.reactivex.disposables.Disposable;
@@ -11,12 +16,10 @@ import io.vertx.reactivex.core.AbstractVerticle;
 import io.vertx.reactivex.core.buffer.Buffer;
 import io.vertx.reactivex.core.net.NetServer;
 import io.vertx.reactivex.core.net.NetSocket;
+import io.vertx.reactivex.core.streams.Pump;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.mycompany.rocksdb.POJO.FileMetadata;
-import com.mycompany.rocksdb.POJO.Inode;
 import com.mycompany.rocksdb.myrocksdb.MyRocksDB;
 import com.mycompany.rocksdb.utils.MetaKeyUtils;
 
@@ -28,14 +31,15 @@ import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Locale;
-import java.util.Map;
-import java.util.Optional;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedDeque;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static com.mycompany.rocksdb.MD5Util.calculateMD5;
+import static com.mycompany.rocksdb.constant.GlobalConstant.ROCKS_CHUNK_FILE_KEY;
+import static com.mycompany.rocksdb.myrocksdb.MyRocksDB.deleteAllMetadata;
+import static com.mycompany.rocksdb.netserver.Nfsv3Server.*;
 
 
 public class FTPServer extends AbstractVerticle {
@@ -156,8 +160,6 @@ public class FTPServer extends AbstractVerticle {
         // 为这个新连接创建一个独立的状态对象
         final FtpConnectionState connectionState = new FtpConnectionState();
 
-        connectionState.dataPort = 0; // 初始化数据端口为0
-
         // 2. 创建命令流，使用我们新的 FtpCommandFramer
         Flowable<String> commandStream = socket.toFlowable()
                 .compose(new FtpCommandFramer());
@@ -226,6 +228,9 @@ public class FTPServer extends AbstractVerticle {
                 // 回复 "200 Type set to I." 是一个更标准的响应
                 socket.write("200 Type set to " + args + ".\r\n");
                 break;
+            case "PORT": // <<<<<<<<<< 新增: 处理 PORT 命令
+                handlePort(socket, state, args);
+                break;
             case "EPSV": // <<<<<<<<<< 新增
                 handleEpsv(socket, state);
                 break;
@@ -258,6 +263,12 @@ public class FTPServer extends AbstractVerticle {
             case "APPE": // <<<<<<<<<< 新增: 处理文件追加
                 handleAppe(socket, state, args);
                 break;
+            case "SIZE": // <<<<<<<<<< 新增: 处理 SIZE 命令
+                handleSize(socket, state, args);
+                break;
+            case "MDTM": // <<<<<<<<<< 新增: 处理 MDTM 命令
+                handleMdtm(socket, state, args);
+                break;
             default:
                 log.warn("Unknown command: " + command);
                 socket.write("500 Unknown command.\r\n");
@@ -278,12 +289,16 @@ public class FTPServer extends AbstractVerticle {
         // NetServer dataServer; // 用于PASV模式的数据服务器
         // NetSocket dataSocket; // 建立的数据通道连接
         // 可以在这里添加更多状态，例如当前目录、登录状态等
-        Runnable pendingDataCommand; // <<<<<<<<<< 新增: 用于保存待处理的数据命令
+        // Runnable pendingDataCommand; // <<<<<<<<<< 新增: 用于保存待处理的数据命令
         // 这个 Promise 是我们所有数据通道状态的唯一来源
         Future<NetSocket> dataSocketFuture;
         String currentDirectory = "/"; // <<<<<< 新增：初始化当前目录为根目录
-        int dataPort; // <<<<<< 新增: 用于存储数据端口，用于端口匹配验证
+        // int dataPort; // <<<<<< 新增: 用于存储数据端口，用于端口匹配验证
         long restartOffset = 0; // <<<<<< 新增: 用于断点续传的偏移量
+
+        String bucket = "ftp_bucket";
+
+        String targetVnodeId = MetaKeyUtils.getTargetVnodeId(bucket);
     }
 
     // <<<<<< 新增: FsEntry 内部类，用于表示文件或目录条目 >>>>>>>>
@@ -315,11 +330,24 @@ public class FTPServer extends AbstractVerticle {
         Future<NetSocket> dataSocketFuture = state.dataSocketFuture;
         controlSocket.write("150 Here comes the directory listing.\r\n");
 
+        String bucket = "ftp_bucket";
+        String targetVnodeId = MetaKeyUtils.getTargetVnodeId(bucket);
+
         dataSocketFuture.setHandler(ar -> {
             state.dataSocketFuture = null;
 
             if (ar.succeeded()) {
                 NetSocket dataSocket = ar.result();
+
+                // <<<<<<<<<< 新增: 数据端口验证 >>>>>>>>>>>>
+                // if (state.dataPort != 0 && dataSocket.remoteAddress().port() != state.dataPort) {
+                //     log.warn("Data connection port mismatch. Expected: {}, Actual: {}", state.dataPort, dataSocket.remoteAddress().port());
+                //     controlSocket.write("425 Can't open data connection. Port mismatch.\r\n");
+                //     dataSocket.close();
+                //     state.dataPort = 0; // 重置数据端口
+                //     return;
+                // }
+                // <<<<<<<<<< 新增结束 >>>>>>>>>>>>
 
                 // <<<<<<<<<< 核心修改从这里开始 >>>>>>>>>>>>.
                 // 使用 Path 来安全地解析路径，它能正确处理 ".."
@@ -331,7 +359,7 @@ public class FTPServer extends AbstractVerticle {
                 }
 
                 // 1. 获取RocksDB中实际的文件和目录条目
-                List<LatestIndexMetadata> latestIndexMetadataList = MyRocksDB.listDirectoryContents("defaultVnode", "ftp_bucket", currentPathString);
+                List<LatestIndexMetadata> latestIndexMetadataList = MyRocksDB.listDirectoryContents(targetVnodeId, bucket, currentPathString);
 
                 // 2. 创建一个新的列表，用于最终输出
                 List<String> finalEntries = new ArrayList<>();
@@ -346,7 +374,7 @@ public class FTPServer extends AbstractVerticle {
 
                 // 5. 将真实的条目添加进来
                 for (LatestIndexMetadata latestIndexMetadata : latestIndexMetadataList) {
-                    Optional<Inode> inodeOptional = MyRocksDB.getINodeMetaData("defaultVnode", "ftp_bucket", latestIndexMetadata.getInode());
+                    Optional<Inode> inodeOptional = MyRocksDB.getINodeMetaData(targetVnodeId, bucket, latestIndexMetadata.getInode());
                     if (inodeOptional.isPresent()) {
                         Inode inode = inodeOptional.get();
                         boolean isDirectory = inode.getMode() == 16893; // S_IFDIR constant for directory (040755 in octal)
@@ -393,7 +421,7 @@ public class FTPServer extends AbstractVerticle {
             state.dataSocketFuture.fail("New EPSV command received, old data connection cancelled.");
         }
         state.dataSocketFuture = null;
-        state.dataPort = 0; // 清理旧的数据端口
+        // state.dataPort = 0; // 清理旧的数据端口
 
         // <<<< CHANGE: 使用 Future.future() 工厂方法 >>>>
         // 这个方法接受一个 handler，该 handler 会收到一个 Promise
@@ -408,17 +436,17 @@ public class FTPServer extends AbstractVerticle {
                 promise.complete(dataSocket); // 当连接到达时，兑现承诺
                 //dataServer.close();
                 // 数据连接建立后，执行待处理的数据命令
-                if (state.pendingDataCommand != null) {
-                    state.pendingDataCommand.run();
-                    state.pendingDataCommand = null;
-                }
+//                if (state.pendingDataCommand != null) {
+//                    state.pendingDataCommand.run();
+//                    state.pendingDataCommand = null;
+//                }
             });
 
             // 将监听逻辑也放在这个代码块内部
             dataServer.rxListen(0, HOST).subscribe(
                     server -> {
                         int port = server.actualPort();
-                        state.dataPort = port; // 存储实际监听的数据端口
+                        // state.dataPort = port; // 存储实际监听的数据端口
                         log.info("EPSV data server listening on: " + HOST + ":" + port);
                         String response = "229 Entering Extended Passive Mode (|||" + port + "|).\r\n";
                         // 只有在服务器成功监听后才发送响应
@@ -444,7 +472,7 @@ public class FTPServer extends AbstractVerticle {
             state.dataSocketFuture.fail("New PASV command received, old data connection cancelled.");
         }
         state.dataSocketFuture = null;
-        state.dataPort = 0; // 清理旧的数据端口
+        // state.dataPort = 0; // 清理旧的数据端口
 
         state.dataSocketFuture = Future.future(promise -> {
             NetServer dataServer = vertx.createNetServer();
@@ -459,16 +487,15 @@ public class FTPServer extends AbstractVerticle {
                 promise.complete(dataSocket);
                 //dataServer.close();
                 // 数据连接建立后，执行待处理的数据命令
-                if (state.pendingDataCommand != null) {
-                    state.pendingDataCommand.run();
-                    state.pendingDataCommand = null;
-                }
+//                if (state.pendingDataCommand != null) {
+//                    state.pendingDataCommand.run();
+//                    state.pendingDataCommand = null;
+//                }
             });
 
             dataServer.rxListen(0, HOST).subscribe(
                     server -> {
                         int port = server.actualPort();
-                        state.dataPort = port; // 存储实际监听的数据端口
                         log.info("PASV data server listening on: " + controlSocket.localAddress().host() + ":" + port);
                         String usedIp = EXTERNAL_IP != null ? EXTERNAL_IP : controlSocket.localAddress().host();
                         log.info("PASV response IP: " + usedIp + ", Port: " + port);
@@ -512,6 +539,37 @@ public class FTPServer extends AbstractVerticle {
         }
     }
 
+    public static List<byte[]> readSegment(List<Long> offsets, List<Long> lens, long size) throws IOException {
+        if (!Paths.get(MyRocksDB.FILE_DATA_DEVICE_PATH).toFile().exists()) {
+            log.error("No such path exists...");
+            throw new IOException("No such path exists...");
+        }
+
+        List<byte[]> result = new ArrayList<>();
+        AtomicLong accumulator = new AtomicLong(0);
+
+        for (int i = 0; i < offsets.size(); i++) {
+            long offset = offsets.get(i);
+            long length = lens.get(i);
+
+            try(FileChannel fileChannel = FileChannel.open(Paths.get(MyRocksDB.FILE_DATA_DEVICE_PATH), StandardOpenOption.READ)) {
+                int allocatedLength = (int)length;
+                if (accumulator.addAndGet(length) > size) {
+                    allocatedLength = (int)(length - accumulator.get() + size);
+                }
+                ByteBuffer buffer = ByteBuffer.allocate(allocatedLength);
+                fileChannel.read(buffer, offset);
+                buffer.flip();
+                byte[] data = new byte[buffer.remaining()];
+                buffer.get(data);
+
+                result.add(data);
+            }
+        }
+
+        return result;
+    }
+
     private void handleRetr(NetSocket controlSocket, FtpConnectionState state, String filename) {
         if (state.dataSocketFuture == null) {
             controlSocket.write("425 Use PASV or PORT first.\r\n");
@@ -524,126 +582,81 @@ public class FTPServer extends AbstractVerticle {
         String requestedPathString = requestedPath.toString().replace('\\', '/');
 
         // Instead of checking fileContents directly, we should check MyRocksDB first
-        if (!MyRocksDB.getFileMetaData(requestedPathString).isPresent() && !FTPServer.fileContents.containsKey(requestedPathString)) {
+        String bucket = "ftp_bucket";
+        String targetVnodeId = MetaKeyUtils.getTargetVnodeId(bucket);
+
+        Optional<VersionIndexMetadata> versionIndexMetadataOptinal = MyRocksDB.getIndexMetaData(targetVnodeId, bucket, requestedPathString);
+        if (!versionIndexMetadataOptinal.isPresent()) {
             controlSocket.write("550 Requested action not taken. File unavailable.\r\n");
             state.restartOffset = 0; // Reset offset on file not found
             return;
         }
 
-        state.pendingDataCommand = () -> {
-            state.dataSocketFuture.setHandler(ar -> {
-                state.dataSocketFuture = null; // 清除 future 以防万一
-                if (ar.succeeded()) {
-                    NetSocket dataSocket = ar.result();
+        state.dataSocketFuture.setHandler(ar -> {
+            state.dataSocketFuture = null; // 清除 future 以防万一
+            if (ar.succeeded()) {
+                NetSocket dataSocket = ar.result();
 
-                    // 1. 在控制通道上发送初始响应
-                    Buffer fileContent = getVirtualFileContent(requestedPathString, state.restartOffset); // Pass restartOffset
-                    controlSocket.write("150 Opening BINARY mode data connection for " + filename + " (" + (fileContent.length() + state.restartOffset) + " bytes).\r\n");
+                Buffer fileContent = Buffer.buffer();
 
-                    dataSocket.rxWrite(fileContent).subscribe(
-                            () -> {
-                                log.info("File '" + filename + "' sent successfully.");
-                                dataSocket.close();
-                                controlSocket.write("226 Transfer complete.\r\n");
-                                state.dataPort = 0; // 重置数据端口
-                                state.restartOffset = 0; // Reset offset after successful transfer
-                            },
-                            error -> {
-                                log.error("Failed to write file content to data channel", error);
-                                dataSocket.close();
-                                controlSocket.write("426 Connection closed; transfer aborted.\r\n");
-                                state.dataPort = 0; // 重置数据端口
-                                state.restartOffset = 0; // Reset offset on error
-                            }
-                    );
-                } else {
-                    log.error("Data socket future failed for RETR", ar.cause());
-                    controlSocket.write("425 Can't open data connection.\r\n");
-                    state.dataPort = 0; // 重置数据端口
-                    state.restartOffset = 0; // Reset offset on error
-                }
-            });
-        };
+                VersionIndexMetadata versionIndexMetadata = versionIndexMetadataOptinal.get();
+                // 1. 在控制通道上发送初始响应
+                Inode inode = MyRocksDB.getINodeMetaData(targetVnodeId, bucket, versionIndexMetadata.getInode()).get();
 
-        // 如果数据连接已经就绪，立即执行
-        if (state.dataSocketFuture != null && state.dataSocketFuture.isComplete() && state.dataSocketFuture.succeeded()) {
-            log.info("Data channel already established, executing pending RETR command immediately.");
-            state.pendingDataCommand.run();
-        } else {
-            log.info("Data channel not yet established, RETR command pending.");
-        }
-    }
+                List<Inode.InodeData> list = inode.getInodeData();
 
-    private Buffer getVirtualFileContent(String filename, long offset) {
-        // 先尝试从RocksDB中获取文件内容
-        Optional<FileMetadata> fileMetadataOptional = MyRocksDB.getFileMetaData(filename);
-        if (fileMetadataOptional.isPresent()) {
-            FileMetadata fileMetadata = fileMetadataOptional.get();
-            try {
-                Path dataPath = Paths.get(MyRocksDB.DATA_LUN); // Assuming DATA_LUN is the base directory for file data
+                Queue<Inode.InodeData> readyToReadQueue = new ConcurrentLinkedDeque<>();
+                List<Inode.InodeData> readyToReadList = new ArrayList<>();
+                readyToReadQueue.add(list.get(0));
 
-                Buffer fullFileBuffer = Buffer.buffer();
-
-                List<Long> offsets = fileMetadata.getOffset();
-                List<Long> lengths = fileMetadata.getLen();
-
-                if (offsets != null && lengths != null && offsets.size() == lengths.size()) {
-                    long currentReadOffset = 0;
-                    try (FileChannel fileChannel = FileChannel.open(dataPath, StandardOpenOption.READ)) {
-                        for (int i = 0; i < offsets.size(); i++) {
-                            long chunkOffset = offsets.get(i);
-                            long chunkLength = lengths.get(i);
-
-                            // Skip chunks that are entirely before the restart offset
-                            if (currentReadOffset + chunkLength <= offset) {
-                                currentReadOffset += chunkLength;
-                                continue;
-                            }
-
-                            // Calculate the start position within the current chunk
-                            long startInChunk = 0;
-                            long bytesToReadInChunk = chunkLength;
-                            if (currentReadOffset < offset) {
-                                startInChunk = offset - currentReadOffset;
-                                bytesToReadInChunk = chunkLength - startInChunk;
-                            }
-
-                            ByteBuffer byteBuffer = ByteBuffer.allocate((int) bytesToReadInChunk);
-                            fileChannel.position(chunkOffset + startInChunk);
-                            int bytesRead = fileChannel.read(byteBuffer);
-
-                            if (bytesRead != -1) {
-                                byteBuffer.flip();
-                                byte[] bytes = new byte[byteBuffer.remaining()];
-                                byteBuffer.get(bytes);
-                                fullFileBuffer.appendBuffer(Buffer.buffer(bytes));
-                            } else {
-                                log.warn("Reached end of file unexpectedly while reading chunk for: " + filename);
-                                break;
-                            }
-                            currentReadOffset += chunkLength;
-                        }
-                        return fullFileBuffer;
+                while (!readyToReadQueue.isEmpty()) {
+                    Inode.InodeData inodeData = readyToReadQueue.poll();
+                    if (inodeData.fileName.startsWith(ROCKS_CHUNK_FILE_KEY)) {
+                        String chunkKey = ChunkFile.getChunkKeyFromChunkFileName(inode.getBucket(), inodeData.fileName);
+                        ChunkFile chunkFile = MyRocksDB.getChunkFileMetaData(chunkKey).orElseThrow(() -> new RuntimeException("Could not find chunkFile for " + chunkKey));
+                        readyToReadQueue.addAll(chunkFile.getChunkList());
+                    } else {
+                        readyToReadList.add(inodeData);
                     }
-                } else {
-                    log.warn("FileMetadata for " + filename + " has inconsistent offset/length lists.");
                 }
 
-            } catch (IOException e) {
-                log.error("Error reading file content from disk for: " + filename, e);
-            }
-        }
+                for (Inode.InodeData inodeData : readyToReadList) {
+                    FileMetadata fileMetadata = MyRocksDB.getFileMetaData(inodeData.getFileName()).orElseThrow(() -> new RuntimeException("readChunk failed..."));
+                    List<Long> offsets = fileMetadata.getOffset();
+                    List<Long> lens = fileMetadata.getLen();
+                    try {
+                        List<byte[]> dataList = readSegment(offsets, lens, inodeData.size);
+                        byte[] tmpData = mergeWithByteBuffer(dataList);
 
-        // 如果RocksDB中没有或者获取失败，尝试从内存中获取
-        Buffer contentBuffer = FTPServer.fileContents.get(filename);
-        if (contentBuffer != null) {
-            // If serving from memory, also respect the offset
-            if (offset < contentBuffer.length()) {
-                return contentBuffer.slice((int) offset, contentBuffer.length());
+                        fileContent.appendBytes(tmpData);
+
+                        controlSocket.write("150 Opening BINARY mode data connection for " + filename + " (" + (fileContent.length() + state.restartOffset) + " bytes).\r\n");
+                    } catch (IOException e) {
+                        throw new RuntimeException(e);
+                    }
+                }
+
+                dataSocket.rxWrite(fileContent).subscribe(
+                        () -> {
+                            log.info("File '" + filename + "' sent successfully.");
+                            dataSocket.close();
+                            controlSocket.write("226 Transfer complete.\r\n");
+                            state.restartOffset = 0; // Reset offset after successful transfer
+                        },
+                        error -> {
+                            log.error("Failed to write file content to data channel", error);
+                            dataSocket.close();
+                            controlSocket.write("426 Connection closed; transfer aborted.\r\n");
+                            state.restartOffset = 0; // Reset offset on error
+                        }
+                );
+
+            } else {
+                log.error("Data socket future failed for RETR", ar.cause());
+                controlSocket.write("425 Can't open data connection.\r\n");
+                state.restartOffset = 0; // Reset offset on error
             }
-            return Buffer.buffer(); // Offset is beyond file length, return empty buffer
-        }
-        return Buffer.buffer();
+        });
     }
 
     private void handleMkd(NetSocket controlSocket, FtpConnectionState state, String pathArg) {
@@ -687,33 +700,20 @@ public class FTPServer extends AbstractVerticle {
 //            return;
 //        }
 
-        //FTPServer.virtualFileSystem.put(newDirPathString, new ArrayList<>());
+        String bucket = "ftp_bucket"; // Placeholder
+        String object = newDirPathString; // Use the full path as object name
+        String contentType = "directory"; // Content type for directories
+        String targetVnodeId = MetaKeyUtils.getTargetVnodeId(bucket);
 
-        String newDirName = newDirPath.getFileName().toString();
-//        List<FsEntry> parentDirContent = FTPServer.virtualFileSystem.get(parentDirPathString);
-//        if (parentDirContent != null) {
-//            parentDirContent.add(new FsEntry(newDirName, true, 4096)); // 目录默认大小为 4096 字节
-//        }
+        // Save inode metadata for the new directory
+        Optional<Inode> inodeOptional = MyRocksDB.saveIndexMetaAndInodeData(
+                targetVnodeId, bucket, object, 0, contentType, 16893);
 
-        try {
-            String targetVnodeId = "defaultVnode"; // Placeholder
-            String bucket = "ftp_bucket"; // Placeholder
-            String object = newDirPathString; // Use the full path as object name
-            String contentType = "directory"; // Content type for directories
-
-            // Save inode metadata for the new directory
-            Optional<Inode> inodeOptional = MyRocksDB.saveIndexMetaAndInodeData(
-                    targetVnodeId, bucket, object, newDirName, 0, contentType, true, 16893);
-
-            if (inodeOptional.isPresent()) {
-                log.info("Directory created and metadata saved to RocksDB: " + newDirPathString);
-                controlSocket.write("257 \"" + newDirPathString + "\" created.\r\n");
-            } else {
-                log.error("Failed to save inode metadata for directory: " + newDirPathString);
-                controlSocket.write("451 Requested action aborted. Local error in processing.\r\n");
-            }
-        } catch (JsonProcessingException e) {
-            log.error("Error processing JSON for directory metadata: " + newDirPathString, e);
+        if (inodeOptional.isPresent()) {
+            log.info("Directory created and metadata saved to RocksDB: " + newDirPathString);
+            controlSocket.write("257 \"" + newDirPathString + "\" created.\r\n");
+        } else {
+            log.error("Failed to save inode metadata for directory: " + newDirPathString);
             controlSocket.write("451 Requested action aborted. Local error in processing.\r\n");
         }
     }
@@ -753,121 +753,79 @@ public class FTPServer extends AbstractVerticle {
 
         log.info("Resolved New Path: '" + newFilePathString + "'");
         log.info("Resolved Parent Path: '" + parentDirPathString + "'");
-//
-//        if (!FTPServer.virtualFileSystem.containsKey(parentDirPathString)) {
-//            controlSocket.write("550 Requested action not taken. Parent directory does not exist. ("+parentDirPathString+")\r\n");
-//            return;
-//        }
 
-        // 如果文件已存在，则允许覆盖，不返回错误
-        // if (FTPServer.virtualFileSystem.containsKey(newFilePathString)) {
-        //     controlSocket.write("550 Requested action not taken. File exists.\r\n");
-        //     return;
-        // }
+        state.dataSocketFuture.setHandler(ar -> {
+            state.dataSocketFuture = null; // 清除 future 以防万一
+            if (ar.succeeded()) {
+                NetSocket dataSocket = ar.result();
 
-        state.pendingDataCommand = () -> {
-            state.dataSocketFuture.setHandler(ar -> {
-                state.dataSocketFuture = null; // 清除 future 以防万一
-                if (ar.succeeded()) {
-                    NetSocket dataSocket = ar.result();
+                controlSocket.write("150 File status okay; about to open data connection.\r\n");
 
-                    // 1. 在控制通道上发送初始响应
-                    controlSocket.write("150 File status okay; about to open data connection.\r\n");
+                final Buffer receivedData = Buffer.buffer();
+                AtomicLong totalPumped = new AtomicLong(0);
+                dataSocket.handler(buffer -> {
+                    receivedData.appendBuffer(buffer);
+                    totalPumped.addAndGet(buffer.length());
+                });
+                log.info("DataSocket handler registered for file " + filename);
+                //dataSocket.resume();
 
-                    final Buffer receivedData = Buffer.buffer();
-                    dataSocket.handler(buffer -> {
-                        //log.info("Received data chunk of size: " + buffer.length() + " bytes for file " + filename);
-                        //log.info("Data chunk content: " + buffer.toString(java.nio.charset.StandardCharsets.UTF_8));
-                        receivedData.appendBuffer(buffer);
+                dataSocket.endHandler(v -> {
+                    long fileSize = receivedData.length();
 
-                    });
-                    log.info("DataSocket handler registered for file " + filename);
-                    dataSocket.resume();
+                    String bucket = "ftp_bucket"; // Placeholder
+                    String targetVnodeId = MetaKeyUtils.getTargetVnodeId(bucket); // "defaultVnode"; // Placeholder
+                    String object = newFilePathString; // Use the full path as object name
+                    String contentType = "application/octet-stream"; // Default for binary data
+                    String requestId = MetaKeyUtils.getRequestId();
 
-                    dataSocket.endHandler(v -> {
-                        long fileSize = receivedData.length();
+                    Inode.InodeData inodeData = new Inode.InodeData();
+                    inodeData.offset = state.restartOffset;
+                    inodeData.size = fileSize;
+                    inodeData.fileName = MetaKeyUtils.getObjFileName(bucket, object, requestId);
+                    inodeData.etag = "calculateMD5(receivedData.getBytes());";
+                    inodeData.storage = "dataa";
 
-                        String targetVnodeId = "defaultVnode"; // Placeholder
-                        String bucket = "ftp_bucket"; // Placeholder
-                        String object = newFilePathString; // Use the full path as object name
-                        String contentType = "application/octet-stream"; // Default for binary data
-                        boolean isCreated = !FTPServer.fileContents.containsKey(newFilePathString); // Check if file already exists
+                    log.info("DataSocket endHandler registered for file " + filename + ", size: " + fileSize);
+                    try {
+                        long reqOffset = state.restartOffset;
 
-                        Inode.InodeData inodeData = new Inode.InodeData();
-                        inodeData.offset = state.restartOffset;
-                        inodeData.size = fileSize;
-                        inodeData.fileName = MetaKeyUtils.getFileMetaKey(object);
-                        inodeData.etag = calculateMD5(receivedData.getBytes());
-                        inodeData.storage = "dataa";
+                        Optional<Inode> inodeOptional = MyRocksDB.saveIndexMetaAndInodeData(targetVnodeId, bucket, object, fileSize, contentType, 12345);
+                        Inode inode = inodeOptional.get();
 
-                        log.info("DataSocket endHandler registered for file " + filename + ", size: " + fileSize);
-                        try {
-                            // 1. 保存元数据 (Inode)
-                            Optional<Inode> inodeOptional = MyRocksDB.saveIndexMetaAndInodeData(
-                                    targetVnodeId, bucket, object, newFilePath.getFileName().toString(), fileSize, contentType, isCreated, 12345);
+                        List<Inode.InodeData> list = inode.getInodeData();
 
-                            if (inodeOptional.isPresent()) {
-                                Inode inode = inodeOptional.get();
-
-                                // 2. 保存文件数据
-                                // 获取一个唯一的版本key，例如使用inode的节点ID和当前时间戳
-
-                                long fileOffset = MyRocksDB.saveFileMetaData(
-                                    targetVnodeId,
-                                    bucket,
-                                    object,
-                                    inode.getVersionId(),
-                                    receivedData.getBytes(),
-                                    fileSize,
-                                    isCreated // This should be `isAppend` now
-                                );
-
-                                //FTPServer.fileContents.put(newFilePathString, receivedData); // Keep in memory for RETR
-                                log.info("File '" + object + "' received successfully. Total size: " + fileSize + " bytes.");
-                                dataSocket.close();
-                                controlSocket.write("226 Transfer complete.\r\n");
-                                state.dataPort = 0; // 重置数据端口
-                                state.restartOffset = 0; // Reset offset after successful transfer
-                            } else {
-                                log.error("Failed to save inode metadata for file: " + filename);
-                                dataSocket.close();
-                                controlSocket.write("451 Requested action aborted. Local error in processing.\r\n");
-                                state.dataPort = 0; // 重置数据端口
-                                state.restartOffset = 0; // Reset offset on error
-                            }
-                        } catch (Exception e) {
-                            log.error("Failed to save file to RocksDB: " + filename, e);
-                            dataSocket.close();
-                            controlSocket.write("451 Requested action aborted. Local error in processing.\r\n");
-                            state.dataPort = 0; // 重置数据端口
-                            state.restartOffset = 0; // Reset offset on error
+                        if (reqOffset > inode.getSize()) {
+                            appendData(list, Inode.InodeData.newHoleFile(reqOffset), inode, null);
                         }
-                    });
+                        appendData(list, inodeData, inode, receivedData.getBytes());
 
-                    dataSocket.exceptionHandler(error -> {
-                        log.error("Error on data channel for STOR of file " + filename, error);
+                        log.info("File '" + object + "' received successfully. Total size: " + totalPumped + " bytes.");
                         dataSocket.close();
-                        controlSocket.write("426 Connection closed; transfer aborted.\r\n");
-                        state.dataPort = 0; // 重置数据端口
+                        controlSocket.write("226 Transfer complete.\r\n");
+                        //state.restartOffset = 0; // Reset offset after successful transfer
+
+                    } catch (Exception e) {
+                        log.error("Failed to save file to RocksDB: " + filename, e);
+                        dataSocket.close();
+                        controlSocket.write("426 Connection closed; transfer     aborted.\r\n");
                         state.restartOffset = 0; // Reset offset on error
-                    });
+                    }
+                });
 
-                } else {
-                    log.error("Data socket future failed for STOR", ar.cause());
-                    controlSocket.write("425 Can't open data connection.\r\n");
-                    state.dataPort = 0; // 重置数据端口
+                dataSocket.exceptionHandler(error -> {
+                    log.error("Error on data channel for STOR of file " + filename, error);
+                    dataSocket.close();
+                    controlSocket.write("426 Connection closed; transfer aborted.\r\n");
                     state.restartOffset = 0; // Reset offset on error
-                }
-            });
-        };
+                });
 
-        // 如果数据连接已经就绪，立即执行
-        if (state.dataSocketFuture != null && state.dataSocketFuture.isComplete() && state.dataSocketFuture.succeeded()) {
-            log.info("Data channel already established, executing pending STOR command immediately.");
-            state.pendingDataCommand.run();
-        } else {
-            log.info("Data channel not yet established, STOR command pending.");
-        }
+            } else {
+                log.error("Data socket future failed for STOR", ar.cause());
+                controlSocket.write("425 Can't open data connection.\r\n");
+                state.restartOffset = 0; // Reset offset on error
+            }
+        });
     }
 
     private void handleDELE(NetSocket socket, FtpConnectionState state, String fileName) throws IOException, org.rocksdb.RocksDBException {
@@ -875,9 +833,38 @@ public class FTPServer extends AbstractVerticle {
         Path filePath = Paths.get(state.currentDirectory).resolve(fileName).normalize();
         String fullPath = filePath.toString().replace('\\', '/');
 
+        String bucket = "ftp_bucket";
+        String targetVnodeId = MetaKeyUtils.getTargetVnodeId(bucket);
+
         try {
-            MyRocksDB.deleteFile(fullPath);
+            VersionIndexMetadata versionIndexMetadata = MyRocksDB.getIndexMetaData(targetVnodeId, bucket, fullPath).orElseThrow(() -> new org.rocksdb.RocksDBException("Could not find index metadata for " + bucket));
+
+            long inodeId = versionIndexMetadata.getInode();
+            Inode inode = MyRocksDB.getINodeMetaData(targetVnodeId, bucket, inodeId).orElseThrow(() -> new org.rocksdb.RocksDBException("Could not find Inode for " + bucket));
+
+            List<Inode.InodeData> list = inode.getInodeData();
+
+            for (Inode.InodeData inodeData : list) {
+                if (inodeData.fileName.startsWith(ROCKS_CHUNK_FILE_KEY)) {
+                    String chunkKey = ChunkFile.getChunkKeyFromChunkFileName(inode.getBucket(), inodeData.fileName);
+                    ChunkFile chunkFile = MyRocksDB.getChunkFileMetaData(chunkKey).orElseThrow(() -> new org.rocksdb.RocksDBException("Could not find chunkFile for " + chunkKey));
+
+                    List<Inode.InodeData> chunkList = chunkFile.getChunkList();
+
+                    for (Inode.InodeData realData : chunkList) {
+                        MyRocksDB.deleteFile(realData.fileName);
+                    }
+
+                    MyRocksDB.deleteChunkFileMetaData(chunkKey);
+                }
+            }
+
+            // Call deleteAllMetadata to delete all associated metadata
+            log.info("Stamp {} for deleting file: {}", versionIndexMetadata.getStamp(), fileName);
+            deleteAllMetadata(targetVnodeId, bucket, inode.getObjName(), versionIndexMetadata.getStamp());
+
             sendResponse(socket, "250 Requested file action okay, completed.");
+
         } catch (org.rocksdb.RocksDBException e) {
             log.error("Failed to delete file from RocksDB: " + fileName, e);
             sendResponse(socket, "550 Could not delete file (RocksDB error).");
@@ -907,11 +894,106 @@ public class FTPServer extends AbstractVerticle {
         Path filePath = Paths.get(state.currentDirectory).resolve(filename).normalize();
         String fullPath = filePath.toString().replace('\\', '/');
 
-        Optional<FileMetadata> fileMetadataOptional = MyRocksDB.getFileMetaData(fullPath);
-        if (fileMetadataOptional.isPresent()) {
-            FileMetadata fileMetadata = fileMetadataOptional.get();
-            state.restartOffset = fileMetadata.getSize();
-            controlSocket.write("350 Appending to file. Restarting at " + state.restartOffset + ".\r\n");
+        String bucket = "ftp_bucket";
+        String targetVnodeId = MetaKeyUtils.getTargetVnodeId(bucket);
+
+        Optional<VersionIndexMetadata> versionIndexMetadataOptinal = MyRocksDB.getIndexMetaData(targetVnodeId, bucket, fullPath);
+        if (versionIndexMetadataOptinal.isPresent()) {
+            VersionIndexMetadata versionIndexMetadata = versionIndexMetadataOptinal.get();
+            Inode inode = MyRocksDB.getINodeMetaData(targetVnodeId, bucket, versionIndexMetadata.getInode()).get();
+            long reqOffset = state.restartOffset;
+
+            state.dataSocketFuture.setHandler(ar -> {
+                state.dataSocketFuture = null; // 清除 future 以防万一
+                if (ar.succeeded()) {
+                    NetSocket dataSocket = ar.result();
+
+                    controlSocket.write("150 File status okay; about to open data connection.\r\n");
+
+                    final Buffer receivedData = Buffer.buffer();
+                    AtomicLong totalPumped = new AtomicLong(0);
+                    dataSocket.handler(buffer -> {
+                        receivedData.appendBuffer(buffer);
+                        totalPumped.addAndGet(buffer.length());
+                    });
+                    log.info("DataSocket handler registered for file " + filename);
+                    dataSocket.resume();
+
+                    dataSocket.endHandler(v -> {
+                        long fileSize = receivedData.length();
+
+                        String object = fullPath; // Use the full path as object name
+                        String contentType = "application/octet-stream"; // Default for binary data
+                        String requestId = MetaKeyUtils.getRequestId();
+
+                        Inode.InodeData inodeData = new Inode.InodeData();
+                        inodeData.offset = reqOffset;
+                        inodeData.size = fileSize;
+                        inodeData.fileName = MetaKeyUtils.getObjFileName(bucket, object, requestId);
+                        inodeData.etag = "calculateMD5(receivedData.getBytes());";
+                        inodeData.storage = "dataa";
+
+                        log.info("DataSocket endHandler registered for file " + filename + ", size: " + fileSize);
+                        try {
+
+                            List<Inode.InodeData> list = inode.getInodeData();
+                            // 如果写入的位置大于文件的末端
+                            if (reqOffset >= inode.getSize()) {
+                                if (reqOffset > inode.getSize()) {
+                                    appendData(list , Inode.InodeData.newHoleFile(reqOffset - inode.getSize()), inode, null);
+                                    appendData(list, inodeData, inode, receivedData.getBytes());
+                                }
+                                // 恰好追加
+                                else {
+                                    appendData(list, inodeData, inode, receivedData.getBytes());
+                                }
+                            }
+                            // 新加入的 inodeata 与 原来的数据有交集
+                            else {
+                                Inode.InodeData last = list.get(list.size() - 1);
+                                String chunkKey = ChunkFile.getChunkKeyFromChunkFileName(inode.getBucket(), last.fileName);
+                                ChunkFile chunkFile = MyRocksDB.getChunkFileMetaData(chunkKey).orElseThrow(() -> new RuntimeException("chunk file not found for chunkKey: " + chunkKey));
+                                long updatedtotalSize = Inode.partialOverwrite3(chunkFile, reqOffset, inodeData);
+
+                                String verisonKey = MetaKeyUtils.getVersionMetaDataKey(targetVnodeId, inode.getBucket(), inode.getObjName(), null);
+
+                                MyRocksDB.saveFileMetaData(inodeData.fileName, verisonKey, receivedData.getBytes(), fileSize, true);
+
+                                chunkFile.setSize(chunkFile.getSize() + updatedtotalSize);
+                                inode.setSize(chunkFile.getSize() + updatedtotalSize);
+                                last.setChunkNum(chunkFile.getChunkList().size());
+                                last.setSize(chunkFile.getSize() + updatedtotalSize);
+
+                                MyRocksDB.saveINodeMetaData(targetVnodeId, inode);
+                                MyRocksDB.saveChunkFileMetaData(chunkKey, chunkFile);
+                            }
+
+                            log.info("File '" + object + "' received successfully. Total size: " + totalPumped + " bytes.");
+                            dataSocket.close();
+                            controlSocket.write("226 Transfer complete.\r\n");
+
+                        } catch (Exception e2) {
+                            log.error("Failed to save file to RocksDB: " + filename, e2);
+                            dataSocket.close();
+                            controlSocket.write("426 Connection closed; transfer aborted.\r\n");
+                            state.restartOffset = 0; // Reset offset on error
+                        }
+                    });
+
+                    dataSocket.exceptionHandler(error -> {
+                        log.error("Error on data channel for STOR of file " + filename, error);
+                        dataSocket.close();
+                        controlSocket.write("426 Connection closed; transfer aborted.\r\n");
+                        state.restartOffset = 0; // Reset offset on error
+                    });
+
+                } else {
+                    log.error("Data socket future failed for STOR", ar.cause());
+                    controlSocket.write("425 Can't open data connection.\r\n");
+                    state.restartOffset = 0; // Reset offset on error
+                }
+            });
+
         } else {
             // If file doesn't exist, treat as a normal STOR (start from 0)
             state.restartOffset = 0;
@@ -919,7 +1001,100 @@ public class FTPServer extends AbstractVerticle {
         }
 
         // Then proceed with STOR logic, which will use the restartOffset
-        handleStor(controlSocket, state, filename);
+        //handleStor(controlSocket, state, filename);
+    }
+
+    private void handleSize(NetSocket controlSocket, FtpConnectionState state, String filename) {
+        Path filePath = Paths.get(state.currentDirectory).resolve(filename).normalize();
+        String fullPath = filePath.toString().replace('\\', '/');
+
+        String bucket = "ftp_bucket";
+        String targetVnodeId = MetaKeyUtils.getTargetVnodeId(bucket);
+
+        Optional<VersionIndexMetadata> fileMetadataOptional = MyRocksDB.getIndexMetaData(targetVnodeId, bucket, fullPath);
+        if (fileMetadataOptional.isPresent()) {
+            Inode inode = MyRocksDB.getINodeMetaData(targetVnodeId, bucket, fileMetadataOptional.get().getInode()).get();
+            log.info("213 " + inode.getSize() + "\r\n");
+            controlSocket.write("213 " + inode.getSize() + "\r\n");
+        } else {
+            controlSocket.write("550 Could not get file size.\r\n");
+        }
+    }
+
+    private void handleMdtm(NetSocket controlSocket, FtpConnectionState state, String filename) {
+        log.info("--- Entering handleMdtm ---");
+        log.info("Current Directory: '" + state.currentDirectory + "'");
+        log.info("Argument (filename): '" + filename + "'");
+        log.info("FileSystem Keys: " + FTPServer.virtualFileSystem.keySet());
+
+        Path filePath = Paths.get(state.currentDirectory).resolve(filename).normalize();
+        String fullPath = filePath.toString().replace('\\', '/');
+
+        String bucket = "ftp_bucket";
+        String targetVnodeId = MetaKeyUtils.getTargetVnodeId(bucket);
+
+        Optional<VersionIndexMetadata> versionIndexMetadataOptinal = MyRocksDB.getIndexMetaData(targetVnodeId, bucket, fullPath);
+        if (versionIndexMetadataOptinal.isPresent()) {
+            VersionIndexMetadata versionIndexMetadata = versionIndexMetadataOptinal.get();
+            Inode inode = MyRocksDB.getINodeMetaData(targetVnodeId, bucket, versionIndexMetadata.getInode()).get();
+            LocalDateTime lastModified = inode.getLastModified();
+            DateTimeFormatter formatter = DateTimeFormatter.ofPattern("MMM dd HH:mm", Locale.ENGLISH);
+            String lastModifiedString = lastModified.format(formatter);
+            controlSocket.write("250 " + lastModifiedString + "\r\n");
+        } else {
+            controlSocket.write("550 Could not get file last modified time.\r\n");
+        }
+    }
+
+    private void handlePort(NetSocket controlSocket, FtpConnectionState state, String args) {
+        // PORT command arguments are in the format "h1,h2,h3,h4,p1,p2"
+        try {
+            String[] parts = args.split(",");
+            if (parts.length != 6) {
+                controlSocket.write("501 Syntax error in parameters or arguments.\r\n");
+                return;
+            }
+
+            String ipAddress = String.join(".", parts[0], parts[1], parts[2], parts[3]);
+            int p1 = Integer.parseInt(parts[4]);
+            int p2 = Integer.parseInt(parts[5]);
+            int dataPort = (p1 * 256) + p2;
+
+            log.info("Client requested PORT active connection to " + ipAddress + ":" + dataPort);
+
+            // Clear any previous data connection state
+            if (state.dataSocketFuture != null && !state.dataSocketFuture.isComplete()) {
+                log.warn("Cancelling old dataSocketFuture for PORT command.");
+                state.dataSocketFuture.fail("New PORT command received, old data connection cancelled.");
+            }
+            state.dataSocketFuture = null;
+
+            // Create a new future for the data socket
+            state.dataSocketFuture = Future.future(promise -> {
+                vertx.createNetClient().rxConnect(dataPort, ipAddress)
+                        .subscribe(
+                                dataSocket -> {
+                                    log.info("Connected to client data channel: " + dataSocket.remoteAddress());
+                                    log.info("Data channel (PORT) connection established.");
+                                    promise.complete(dataSocket);
+                                },
+                                error -> {
+                                    log.error("Failed to connect to client data channel for PORT: " + ipAddress + ":" + dataPort, error);
+                                    controlSocket.write("425 Can't open data connection.\r\n");
+                                    promise.fail(error);
+                                }
+                        );
+            });
+
+            controlSocket.write("200 PORT command successful.\r\n");
+
+        } catch (NumberFormatException e) {
+            log.error("Number format exception in PORT command arguments: " + args, e);
+            controlSocket.write("501 Syntax error in parameters or arguments (numeric expected).\r\n");
+        } catch (Exception e) {
+            log.error("Error handling PORT command: " + args, e);
+            controlSocket.write("500 Internal server error.\r\n");
+        }
     }
 
      @Override

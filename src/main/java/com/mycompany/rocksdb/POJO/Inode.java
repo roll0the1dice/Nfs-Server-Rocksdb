@@ -18,6 +18,8 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 
 import static com.mycompany.rocksdb.constant.GlobalConstant.ROCKS_INODE_PREFIX;
 
@@ -521,5 +523,7 @@ public class Inode {
         }
     }
 
-
+    public LocalDateTime getLastModified() {
+        return LocalDateTime.ofEpochSecond(this.mtime, 0, ZoneOffset.UTC);
+    }
 }

@@ -18,7 +18,7 @@ public class PortMapperServer extends AbstractVerticle {
     // <-- MODIFIED: Logger 应该关联当前类，而不是 MyRocksDB
     private static final Logger log = LoggerFactory.getLogger(PortMapperServer.class);
 
-    private static final int RPCBIND_PORT = 111;
+    private static final int RPCBIND_PORT = 11111;
     private static final int PORTMAPPER_PROGRAM = 100000;
     private static final int PORTMAPPER_VERSION = 2;
     private static final int PMAPPROC_GETPORT = 3;
