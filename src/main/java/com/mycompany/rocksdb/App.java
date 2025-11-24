@@ -2,6 +2,7 @@ package com.mycompany.rocksdb;
 
 import com.mycompany.rocksdb.netserver.MountServer;
 import com.mycompany.rocksdb.netserver.Nfsv3Server;
+import com.mycompany.rocksdb.netserver.Nfsv4Server;
 import com.mycompany.rocksdb.netserver.PortMapperServer;
 import io.rsocket.RSocketFactory;
 import io.rsocket.frame.decoder.PayloadDecoder;
@@ -16,9 +17,10 @@ public class App {
     public static void main(String[] args) {
         Vertx vertx = Vertx.vertx();
 
-        vertx.deployVerticle(new PortMapperServer());
-        vertx.deployVerticle(new MountServer());
-        vertx.deployVerticle(new Nfsv3Server());
+        // vertx.deployVerticle(new PortMapperServer());
+        // vertx.deployVerticle(new MountServer());
+        // vertx.deployVerticle(new Nfsv3Server());
+        vertx.deployVerticle(new Nfsv4Server());
 
     }
 }

@@ -10,6 +10,7 @@ import io.lettuce.core.RedisClient;
 import io.lettuce.core.RedisURI;
 import io.lettuce.core.api.StatefulRedisConnection;
 import io.lettuce.core.api.sync.RedisCommands;
+import lombok.Data;
 import org.apache.commons.lang3.StringUtils;
 import org.rocksdb.ColumnFamilyDescriptor;
 import org.rocksdb.ColumnFamilyHandle;
@@ -52,6 +53,7 @@ import org.rocksdb.RocksIterator;
  * 与项目中的实际实现逻辑完全一致，使用真实的RocksDB列簇来存储已分配区间
  *
  */
+@Data
 public class MyRocksDB {
     private static final Logger logger = LoggerFactory.getLogger(MyRocksDB.class);
 
@@ -963,7 +965,7 @@ public class MyRocksDB {
 
             versionIndexMetadata = Optional.of(VersionIndexMetadata.builder().sysMetaData(objectMapper.writeValueAsString(sysMetaData))
                     .userMetaData("{\"x-amz-meta-cb-modifiedtime\":\"Thu, 17 Apr 2025 11:27:08 GMT\"}").objectAcl(objectMapper.writeValueAsString(objectAcl)).endIndex(-1)
-                    .versionNum(versionNum).syncStamp(syncStamp).shardingStamp(shardingStamp).stamp(timestamp)
+                    .versionNum(versionNum).syncStamp(syncStamp).shardingStamp(shardingStamp).stamp(timestamp).versionId(versionId)
                     .storage("dataa").key(object).bucket(bucket).build());
 
             int seconds = (int) (timestamp / 1000);
@@ -1054,7 +1056,7 @@ public class MyRocksDB {
                         .contentType(contentType).lastModified(formattedDate.toString()).owner(owner).eTag("").displayName("testuser").build();
                 versionIndexMetadata = Optional.of(VersionIndexMetadata.builder().sysMetaData(objectMapper.writeValueAsString(sysMetaData))
                         .userMetaData("{\"x-amz-meta-cb-modifiedtime\":\"Thu, 17 Apr 2025 11:27:08 GMT\"}").objectAcl(objectMapper.writeValueAsString(objectAcl)).fileName(fileName).endIndex(endIndex)
-                        .versionNum(versionNum).syncStamp(syncStamp).shardingStamp(shardingStamp).stamp(timestamp)
+                        .versionNum(versionNum).syncStamp(syncStamp).shardingStamp(shardingStamp).stamp(timestamp).versionId(versionId)
                         .storage("dataa").key(object).bucket(bucket).build());
 
             }
@@ -1073,7 +1075,7 @@ public class MyRocksDB {
 
     }
 
-    public static void saveINodeMetaData(String targetVnodeId, Inode inode) throws JsonProcessingException {
+    public static void saveINodeMetaData(String targetVnodeId, Inode inode) {
         ObjectMapper objectMapper = new ObjectMapper();
 
         String lun = INDEX_LUN;
@@ -1182,7 +1184,7 @@ public class MyRocksDB {
         return true;
     }
 
-    public static void saveChunkFileMetaData(String chunkFileKey, ChunkFile chunkFile) throws JsonProcessingException {
+    public static void saveChunkFileMetaData(String chunkFileKey, ChunkFile chunkFile) {
         ObjectMapper objectMapper = new ObjectMapper();
 
         String lun = INDEX_LUN;
@@ -1384,4 +1386,76 @@ public class MyRocksDB {
             logger.error("Error deleting metadata for vnodeId: {}, bucket: {}, object: {}", targetVnodeId, bucket, object, e);
         }
     }
+
+    public static void renameFile(String targetVnodeId, String bucket, String oldPath, String newPath) throws RocksDBException {
+        ObjectMapper objectMapper = new ObjectMapper();
+        String lun = INDEX_LUN;
+        MyRocksDB db = MyRocksDB.getRocksDB(lun);
+
+        if (db == null) {
+            logger.error("无法获取LUN {} 的 MyRocksDB 实例", lun);
+            throw new RuntimeException("MyRocksDB 实例未初始化");
+        }
+
+        try {
+            // 1. 获取旧文件的 VersionIndexMetadata
+            Optional<VersionIndexMetadata> oldVersionIndexMetadataOptional = getIndexMetaData(targetVnodeId, bucket, oldPath);
+            if (!oldVersionIndexMetadataOptional.isPresent()) {
+                throw new RocksDBException("Old file/directory not found: " + oldPath);
+            }
+            VersionIndexMetadata oldVersionIndexMetadata = oldVersionIndexMetadataOptional.get();
+
+            // 2. 获取旧文件的 Inode
+            Optional<Inode> oldInodeOptional = getINodeMetaData(targetVnodeId, bucket, oldVersionIndexMetadata.getInode());
+            if (!oldInodeOptional.isPresent()) {
+                throw new RocksDBException("Inode not found for old file: " + oldPath);
+            }
+            Inode oldInode = oldInodeOptional.get();
+
+            // 3. 构建新路径的元数据对象
+            // 创建新的 VersionIndexMetadata (大部分内容与旧的一致，但更新 key 和 objectName)
+            VersionIndexMetadata newVersionIndexMetadata = VersionIndexMetadata.builder()
+                    .from(oldVersionIndexMetadata) // 复制所有字段
+                    .key(newPath)
+                    .build();
+
+            // 创建新的 Inode (大部分内容与旧的一致，但更新 objName)
+            Inode newInode = Inode.builder()
+                    .from(oldInode) // 复制所有字段
+                    .objName(newPath)
+                    .build();
+
+            // 4. 更新 Inode 中的 objName 和 VersionIndexMetadata 中的 key 和 object
+            // 实际上在上面构建新对象时已经完成了，这里只是为了清晰说明逻辑
+            newInode.setObjName(newPath);
+            newVersionIndexMetadata.setKey(newPath);
+            //newVersionIndexMetadata.setObject(newPath);
+            newVersionIndexMetadata.setInodeObject(newInode);
+
+            // 5. 生成新路径对应的各种 Key
+            String newVersionKey = MetaKeyUtils.getVersionMetaDataKey(targetVnodeId, bucket, newPath, newVersionIndexMetadata.getVersionId());
+            String newLifeCycleMetaKey = MetaKeyUtils.getLifeCycleMetaKey(targetVnodeId, bucket, newPath, newVersionIndexMetadata.getVersionId(), String.valueOf(newVersionIndexMetadata.getStamp()));
+            String newLatestMetaKey = MetaKeyUtils.getLatestMetaKey(targetVnodeId, bucket, newPath);
+            String newMetaKey = MetaKeyUtils.getMetaDataKey(targetVnodeId, bucket, newPath, "") + "0/null";
+            String newInodeKey = Inode.getKey(targetVnodeId, newInode.getBucket(), newInode.getNodeId());
+
+            // 6. 将新的元数据写入 RocksDB
+            db.put(newVersionKey.getBytes(StandardCharsets.UTF_8), objectMapper.writeValueAsBytes(newVersionIndexMetadata));
+            db.put(newLifeCycleMetaKey.getBytes(StandardCharsets.UTF_8), new byte[]{0}); // Assume lifecycle is empty for now
+            db.put(newLatestMetaKey.getBytes(StandardCharsets.UTF_8), objectMapper.writeValueAsBytes(VersionIndexMetadata.toLatestIndexMetadata(newVersionIndexMetadata)));
+            db.put(newMetaKey.getBytes(StandardCharsets.UTF_8), objectMapper.writeValueAsBytes(VersionIndexMetadata.toIndexMetadata(newVersionIndexMetadata)));
+
+            // 7. 删除旧路径对应的元数据
+            deleteAllMetadata(targetVnodeId, bucket, oldPath, oldVersionIndexMetadata.getStamp());
+
+            db.put(newInodeKey.getBytes(StandardCharsets.UTF_8), objectMapper.writeValueAsBytes(newInode));
+
+            logger.info("Successfully renamed file/directory from {} to {}", oldPath, newPath);
+
+        } catch (JsonProcessingException | RocksDBException e) {
+            logger.error("Error renaming file from {} to {}", oldPath, newPath, e);
+            throw new RocksDBException("Failed to rename file");
+        }
+    }
+
 }

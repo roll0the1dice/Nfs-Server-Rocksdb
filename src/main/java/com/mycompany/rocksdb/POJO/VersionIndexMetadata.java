@@ -46,6 +46,9 @@ public class VersionIndexMetadata {
   @JsonProperty("versionNum")
   private String versionNum;
 
+  @JsonProperty("versionId")
+  private String versionId;
+
   @JsonProperty("syncStamp")
   private String syncStamp;
 
@@ -72,6 +75,28 @@ public class VersionIndexMetadata {
 
   @JsonProperty("inodeObject")
   private Inode inodeObject;
+
+  public static class VersionIndexMetadataBuilder {
+    public VersionIndexMetadataBuilder from(VersionIndexMetadata other) {
+      this.sysMetaData = other.sysMetaData;
+      this.userMetaData = other.userMetaData;
+      this.objectAcl = other.objectAcl;
+      this.fileName = other.fileName;
+      this.endIndex = other.endIndex;
+      this.versionNum = other.versionNum;
+      this.versionId = other.versionId;
+      this.syncStamp = other.syncStamp;
+      this.shardingStamp = other.shardingStamp;
+      this.stamp = other.stamp;
+      this.storage = other.storage;
+      this.key = other.key;
+      this.bucket = other.bucket;
+      this.inode = other.inode;
+      this.cookie = other.cookie;
+      this.inodeObject = other.inodeObject;
+      return this;
+    }
+  }
 
   public static LatestIndexMetadata toLatestIndexMetadata(VersionIndexMetadata indexMetadata) {
     if (indexMetadata == null) {
