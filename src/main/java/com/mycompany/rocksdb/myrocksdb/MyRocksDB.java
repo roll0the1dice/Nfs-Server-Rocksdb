@@ -831,6 +831,60 @@ public class MyRocksDB {
         return result.toString();
     }
 
+    /**
+     * 从底层存储读取文件数据
+     * @param fileMetadata 文件的元数据，包含数据块的偏移量和长度
+     * @param offset 从文件内容的哪个偏移量开始读取 (NFS请求的offset)
+     * @param count 要读取的字节数 (NFS请求的count)
+     * @return 读取到的字节数组
+     * @throws IOException 如果读取过程中发生IO错误
+     */
+    public static byte[] readFileData(FileMetadata fileMetadata, long offset, int count) throws IOException {
+        Path dataPath = Paths.get(FILE_DATA_DEVICE_PATH);
+        ByteBuffer buffer = ByteBuffer.allocate(count);
+
+        try (FileChannel fileChannel = FileChannel.open(dataPath, StandardOpenOption.READ)) {
+            long currentFileOffset = 0; // Tracks our position within the logical file content
+
+            for (int i = 0; i < fileMetadata.getOffset().size(); i++) {
+                long blockStartOffset = fileMetadata.getOffset().get(i); // Physical start offset of this block
+                long blockLength = fileMetadata.getLen().get(i);         // Length of this block
+
+                long blockEndOffset = currentFileOffset + blockLength; // Logical end offset of this block
+
+                // Check if this block contains any data we need to read
+                if (offset < blockEndOffset && offset + count > currentFileOffset) {
+                    // Calculate the start position in the current block to read from
+                    long readStartInBlock = Math.max(0, offset - currentFileOffset);
+                    // Calculate the number of bytes to read from this block
+                    int bytesToReadFromBlock = (int) Math.min(blockLength - readStartInBlock, count - buffer.position());
+
+                    if (bytesToReadFromBlock > 0) {
+                        // Calculate the physical position in the file channel
+                        long physicalReadPosition = blockStartOffset + readStartInBlock;
+                        
+                        // Set the channel position and read into the buffer
+                        fileChannel.position(physicalReadPosition);
+                        int bytesRead = fileChannel.read(buffer);
+                        if (bytesRead == -1) {
+                            // Reached end of channel unexpectedly
+                            break; 
+                        }
+                    }
+                }
+                currentFileOffset += blockLength;
+                if (buffer.position() == count) {
+                    break; // Read enough data
+                }
+            }
+        }
+
+        byte[] result = new byte[buffer.position()];
+        buffer.flip();
+        buffer.get(result);
+        return result;
+    }
+
     public static void saveRedis(String vnodeId, List<Long> link, String s_uuid) {
         String lun = DATA_LUN;
         // 连接到本地 Redis 6号库
@@ -1100,8 +1154,8 @@ public class MyRocksDB {
 
         String lun = INDEX_LUN;
         if (lun == null || StringUtils.isBlank(lun)) {
-            System.out.println("ERROR: device does not exist!");
-            System.exit(-1);
+            logger.error("ERROR: device does not exist!");
+            return Optional.empty();
         }
 
         try {

@@ -1,0 +1,434 @@
+package com.mycompany.rocksdb.netserver;
+
+import io.reactivex.Flowable;
+import io.reactivex.FlowableTransformer;
+import io.reactivex.disposables.CompositeDisposable;
+import io.reactivex.disposables.Disposable;
+import io.vertx.core.Future;
+import io.vertx.core.net.NetServerOptions;
+import io.vertx.reactivex.core.AbstractVerticle;
+import io.vertx.reactivex.core.net.NetServer;
+import io.vertx.reactivex.core.net.NetSocket;
+import io.vertx.reactivex.core.parsetools.RecordParser;
+
+import org.reactivestreams.Publisher;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import com.mycompany.rocksdb.myrocksdb.MyRocksDB;
+import com.mycompany.rocksdb.utils.MetaKeyUtils;
+import com.mycompany.rocksdb.netserver.XdrUtils;
+import com.mycompany.rocksdb.nfs4.Nfs4Opcode;
+import com.mycompany.rocksdb.netserver.XdrDecodingStream;
+import com.mycompany.rocksdb.netserver.XdrEncodingStream;
+import java.util.concurrent.atomic.AtomicReference;
+
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import io.vertx.reactivex.core.buffer.Buffer; // Import Vert.x Buffer
+import java.util.UUID;
+
+public class Nfsv4Server extends AbstractVerticle {
+    private static final Logger log = LoggerFactory.getLogger(Nfsv4Server.class);
+    private static String HOST = "0.0.0.0";
+    private static final int PORT = 2049; // Standard NFSv4 port
+
+    private final CompositeDisposable disposables = new CompositeDisposable();
+
+    @Override
+    public void start(Future<Void> startPromise) throws Exception {
+        NetServerOptions serverOptions = new NetServerOptions()
+                .setReuseAddress(true)
+                .setReusePort(true)
+                .setHost(HOST)
+                .setPort(PORT);
+
+        NetServer server = vertx.createNetServer(serverOptions);
+
+        Disposable serverSubscription = server.connectStream()
+                .toFlowable()
+                .subscribe(
+                        this::handleNewConnection,
+                        error -> log.error("NFSv4 Server connection error", error)
+                );
+
+        disposables.add(serverSubscription);
+
+        server.rxListen(PORT)
+                .subscribe(
+                        s -> {
+                            log.info("NFSv4 Server started on host " + HOST + " and port " + s.actualPort());
+                            startPromise.complete();
+                        },
+                        error -> {
+                            log.error("Failed to start NFSv4 server", error);
+                            startPromise.fail(error);
+                        }
+                );
+    }
+
+    private void handleNewConnection(NetSocket socket) {
+        log.info("NFSv4 Client connected: " + socket.remoteAddress());
+
+        final Nfsv4ConnectionState connectionState = new Nfsv4ConnectionState();
+
+        // NFSv4 命令处理将涉及 XDR 解码，这里只是一个占位符
+        // 实际的 NFSv4 RPC 消息处理会复杂得多
+        Flowable<Buffer> commandStream = socket.toFlowable()
+                .compose(new NFSV4CommandFramer()); // 占位符
+
+        Disposable socketSubscription = commandStream.subscribe(
+                // onNext: 接收到一条完整的 NFSv4 RPC 消息 (XDR 编码)
+                rpcMessage -> handleNfsv4Command(rpcMessage, socket, connectionState),
+                // onError: 连接出错
+                error -> {
+                    log.error("Error on NFSv4 connection [" + socket.remoteAddress() + "]: ", error);
+                    socket.close();
+                },
+                // onComplete: 客户端断开
+                () -> log.info("NFSv4 Client disconnected: " + socket.remoteAddress())
+        );
+
+        disposables.add(socketSubscription);
+    }
+
+    private void handleNfsv4Command(Buffer rpcMessage, NetSocket socket, Nfsv4ConnectionState state) {
+        // log.info("Received NFSv4 RPC message ({} bytes). This is a placeholder for actual XDR decoding and command handling.", rpcMessage.length());
+
+        XdrDecodingStream xdr = new XdrDecodingStream(rpcMessage.getDelegate().getBytes());
+        try {
+            int xid = xdr.readInt();
+            int msgType = xdr.readInt(); // CALL (0)
+
+            if (msgType != RpcConstants.CALL) {
+                log.error("Received non-CALL message type: {}", msgType);
+                // TODO: Send appropriate RPC error response
+                return;
+            }
+
+            int rpcVersion = xdr.readInt(); // RPC_VERSION (2)
+            int program = xdr.readInt();    // NFS4_PROGRAM (100003)
+            int version = xdr.readInt();    // NFS_V4 (4)
+            int procedure = xdr.readInt(); // NFSPROC4_NULL (0), NFSPROC4_COMPOUND (1), etc.
+
+            // Authentication info (should be AUTH_NONE for now)
+            int credentialFlavor = xdr.readInt(); // credential flavor
+            int credentialLength = xdr.readInt(); // credential length
+            Buffer credential = xdr.readFixedOpaque(credentialLength); // Read credential data
+            int verifierFlavor = xdr.readInt(); // verifier flavor
+            int verifierLength = xdr.readInt(); // verifier length
+            Buffer verifier = xdr.readFixedOpaque(verifierLength); // Read verifier data
+
+            log.info("NFSv4 RPC Call: xid={}, program={}, version={}, procedure={}", Integer.toUnsignedString(xid), program, version, procedure);
+
+            if (credentialLength > 0) {
+                log.info("Credential data: {}", credential.toString());
+            }
+            if (verifierLength > 0) {
+                log.info("Verifier data: {}", verifier.toString());
+            }
+
+            switch (procedure) {
+                case RpcConstants.NFSPROC4_NULL:
+                    handleNullOperation(xid, socket, state);
+                    break;
+                case RpcConstants.NFSPROC4_COMPOUND:
+                    // TODO: Implement COMPOUND operation handling
+                    //log.warn("NFSv4 COMPOUND operation not yet implemented.");
+                    //sendRpcError(xid, socket, RpcConstants.PROG_UNAVAIL);
+                    handleCompoundOperation(xid, socket, state, xdr);
+                    break;
+                default:
+                    log.warn("Unknown NFSv4 procedure: {}", procedure);
+                    sendRpcError(xid, socket, RpcConstants.PROC_UNAVAIL);
+                    break;
+            }
+        } catch (Exception e) {
+            log.error("Error decoding NFSv4 RPC message: ", e);
+            // TODO: Send a GARBAGE_ARGS or SYSTEM_ERR reply
+        }
+    }
+
+    private void handleNullOperation(int xid, NetSocket socket, Nfsv4ConnectionState state) {
+        log.info("Handling NFSv4 NULL operation for xid: {}", Integer.toUnsignedString(xid));
+        // A NULL operation typically just returns a successful RPC reply with no payload.
+        Buffer response = buildRpcReply(xid, RpcConstants.MSG_ACCEPTED, RpcConstants.SUCCESS);
+        log.info("response: {}", response.length());
+        socket.write(response);
+    }
+
+    
+    private void handleCompoundOperation(int xid, NetSocket socket, Nfsv4ConnectionState state, XdrDecodingStream xdr) {
+        log.info("Handling NFSv4 Compound operation for xid: {}", Integer.toUnsignedString(xid));
+        // A NULL operation typically just returns a successful RPC reply with no payload.
+        int tagLength = xdr.readInt(); // tag length
+        Buffer tag = xdr.readFixedOpaque(tagLength); // Read tag data
+        int minorVersion = xdr.readInt(); // minor version
+        int opCount = xdr.readInt(); // number of operations
+        log.info("Compound - Tag: {}, Minor Version: {}, Operation Count: {}", tag.toString(StandardCharsets.UTF_8), minorVersion, opCount);
+        // For now, just send a generic success reply
+        Buffer response = Buffer.buffer();
+        for (int i = 0; i < opCount; i++) {
+            Nfs4Opcode opCode = Nfs4Opcode.fromValue(xdr.readInt()); // Read first operation code
+            switch (opCode) {
+                case NFS4_EXCHANGE_ID:
+                    response.appendBuffer(handleExchangeIdOperation(xid, socket, state, xdr, opCount, opCode.getValue()));
+                    break;
+                case NFS4_CREATE_SESSION:
+                    log.info("Handling NFSv4 CREATE_SESSION operation for xid: {}", Integer.toUnsignedString(xid));
+                    //response.appendBuffer(handleExchangeIdOperation(xid, socket, state, xdr, opCount, opCode.getValue()));
+                default:
+                    break;
+            }
+        }
+        //Buffer response = buildRpcReply(xid, RpcConstants.MSG_ACCEPTED, RpcConstants.SUCCESS);
+
+        socket.write(response);
+    }
+
+    private Buffer handleExchangeIdOperation(int xid, NetSocket socket, Nfsv4ConnectionState state, XdrDecodingStream xdr, int opCount, int opCode) {
+        log.info("Handling NFSv4 EXCHANGE_ID operation for xid: {}", Integer.toUnsignedString(xid));
+        try {
+            // Decode EXCHANGE_ID arguments (simplified for now)
+            long verifier = xdr.readLong(); // Skip EXCHANGE_ID arguments for now
+            int dataLength = xdr.readInt();
+            Buffer data = xdr.readFixedOpaque(dataLength);
+            log.info("Compound - EXCHANGE_ID operation with verifier: 0x{}, data length: {}", Long.toHexString(verifier), dataLength);
+            int flags = xdr.readInt(); // Skip flags
+            int eia_state_protect = xdr.readInt();
+            int eia_client_impl_id = xdr.readInt();
+            if (eia_client_impl_id > 0) {
+                int DNSDomainLength = xdr.readInt();
+                Buffer DNSDomain = xdr.readFixedOpaque(DNSDomainLength);
+                log.info("Compound - EXCHANGE_ID DNS Domain: {}", DNSDomain.toString(StandardCharsets.UTF_8)); 
+                int productName = xdr.readInt();
+                Buffer productBuffer = xdr.readFixedOpaque(productName);
+                long buildTimestampSeconds = xdr.readLong();
+                int buildTimestampNanoseconds = xdr.readInt();
+            }
+
+            // Build the EXCHANGE_ID response
+            Buffer response = buildExchangeIdReply(xid, opCount, opCode, 1, data);
+            //socket.write(response);
+            return response;
+        } catch (Exception e) {
+            log.error("Error handling EXCHANGE_ID operation: ", e);
+            sendRpcError(xid, socket, RpcConstants.GARBAGE_ARGS);
+            // Ensure we always return a Buffer to satisfy the method contract.
+            return Buffer.buffer();
+        }
+    }
+
+    private Buffer buildExchangeIdReply(int requestXid, int opCount, int opCode, int seqid, Buffer majorId) {
+        Buffer rpcHeaderBuffer = getReplyHeader(requestXid);
+
+        // EXCHANGE_ID specific response payload
+        Buffer rpcBodyBuffer = Buffer.buffer();
+
+        // EID4_SERVER_OWNER
+        XdrUtils.writeInt(rpcBodyBuffer, 0);
+        XdrUtils.writeOpaque(rpcBodyBuffer, null); // Placeholder for tag
+        XdrUtils.writeInt(rpcBodyBuffer, opCount);
+        XdrUtils.writeInt(rpcBodyBuffer, opCode);
+        XdrUtils.writeLong(rpcBodyBuffer, 1);
+        XdrUtils.writeInt(rpcBodyBuffer, seqid);
+        XdrUtils.writeLong(rpcBodyBuffer, 0x00020001L); 
+        XdrUtils.writeInt(rpcBodyBuffer, 0);
+        XdrUtils.writeLong(rpcBodyBuffer, 0);    // Minor ID
+        XdrUtils.writeOpaque(rpcBodyBuffer, majorId.getBytes()); // Major ID
+        XdrUtils.writeOpaque(rpcBodyBuffer, majorId.getBytes()); // Server Scope
+        XdrUtils.writeInt(rpcBodyBuffer, 0); // sei_impl_id4 length = 0
+
+
+        final int rpcMessageBodyLength = rpcBodyBuffer.length() + rpcHeaderBuffer.length();
+        int recordMarkValue = 0x80000000 | rpcMessageBodyLength;
+
+        Buffer fullResponseBuffer = Buffer.buffer();
+        fullResponseBuffer.appendInt(recordMarkValue);
+        fullResponseBuffer.appendBuffer(rpcHeaderBuffer);
+        fullResponseBuffer.appendBuffer(rpcBodyBuffer);
+
+        return fullResponseBuffer;
+    }
+
+    private Buffer getReplyHeader(int requestXid) {
+        Buffer rpcHeaderBuffer = Buffer.buffer();
+
+        rpcHeaderBuffer.appendInt(requestXid);
+        rpcHeaderBuffer.appendInt(RpcConstants.REPLY);
+        rpcHeaderBuffer.appendInt(RpcConstants.MSG_ACCEPTED);
+        rpcHeaderBuffer.appendInt(RpcConstants.AUTH_NONE);
+        rpcHeaderBuffer.appendInt(0);
+        rpcHeaderBuffer.appendInt(RpcConstants.SUCCESS);
+
+        return rpcHeaderBuffer;
+    }
+
+    // Helper to send generic RPC errors
+    private void sendRpcError(int xid, NetSocket socket, int acceptStat) {
+        log.debug("Sending RPC error: xid={}, acceptStat={}", Integer.toUnsignedString(xid), acceptStat);
+        Buffer response = buildRpcReply(xid, RpcConstants.MSG_ACCEPTED, acceptStat);
+        socket.write(response);
+    }
+
+    /**
+     * Helper to build a basic RPC reply message using Vert.x Buffer.
+     *
+     * @param requestXid The transaction identifier from the original request.
+     * @return A Vert.x Buffer containing the complete XDR response.
+     */
+    private Buffer buildRpcReply(int requestXid, int msgAccepted, int acceptStat) {
+        // --- Create Buffer for the RPC Message Body ---
+        // Vert.x Buffer will automatically expand, so we can just append data.
+        // It's Big Endian by default, which is what XDR requires.
+        Buffer rpcBodyBuffer = Buffer.buffer();
+
+        // 1. XID (Transaction Identifier) - from request
+        rpcBodyBuffer.appendInt(requestXid);
+
+        // 2. Message Type (mtype)
+        rpcBodyBuffer.appendInt(RpcConstants.REPLY);
+
+        // 3. Reply Body (reply_body)
+        //    3.1. Reply Status (stat)
+        rpcBodyBuffer.appendInt(msgAccepted);
+
+        //    3.2. Accepted Reply (areply)
+        //        3.2.1. Verifier (verf - opaque_auth structure)
+        rpcBodyBuffer.appendInt(RpcConstants.AUTH_NONE); // Flavor
+        rpcBodyBuffer.appendInt(0);      // Length of body (0 for AUTH_NONE)
+
+        //        3.2.2. Acceptance Status (stat)
+        rpcBodyBuffer.appendInt(acceptStat);
+
+        //        3.2.3. Results (for NFSPROC3_NULL, this is void, so no data is appended)
+
+        // --- Calculate RPC Message Body Length ---
+        // This is simply the length of the buffer we just built.
+        final int rpcMessageBodyLength = rpcBodyBuffer.length(); // 6 * 4 = 24 bytes
+
+        // --- Construct Record Marking ---
+        // Highest bit set (0x80000000) ORed with the length of the RPC message body.
+        int recordMarkValue = 0x80000000 | rpcMessageBodyLength;
+
+        // --- Create the Full XDR Response ---
+        // Start with a new buffer for the final response.
+        Buffer fullResponseBuffer = Buffer.buffer();
+
+        // Prepend the record mark
+        fullResponseBuffer.appendInt(recordMarkValue);
+
+        // Append the RPC message body
+        fullResponseBuffer.appendBuffer(rpcBodyBuffer);
+
+        // Return the complete buffer
+        return fullResponseBuffer;
+    }
+
+    private static class Nfsv4ConnectionState {
+        String currentDirectory = "/";
+        String bucket = "nfsv4_bucket"; // Dedicated bucket for NFSv4
+        String targetVnodeId = MetaKeyUtils.getTargetVnodeId(bucket);
+        String serverOwner; // Represents the unique identifier for the server in this session
+        String clientMajorId; // Client's major ID from EXCHANGE_ID
+        int clientMinorId; // Client's minor ID from EXCHANGE_ID
+
+
+        public void setServerOwner(String serverOwner) {
+            this.serverOwner = serverOwner;
+        }
+
+        public String getServerOwner() {
+            return serverOwner;
+        }
+
+        public void setClientMajorId(String clientMajorId) {
+            this.clientMajorId = clientMajorId;
+        }
+
+        public String getClientMajorId() {
+            return clientMajorId;
+        }
+
+        public void setClientMinorId(int clientMinorId) {
+            this.clientMinorId = clientMinorId;
+        }
+
+        public int getClientMinorId() {
+            return clientMinorId;
+        }
+    }
+
+    // 占位符：用于模拟 NFSv4 的 XDR 帧处理
+    // 实际实现需要一个复杂的 XDR 解码器
+    private static class NFSV4CommandFramer implements FlowableTransformer<Buffer, Buffer> {
+        private RpcParseState currentState = RpcParseState.READING_MARKER;
+        private boolean isLastFragment;
+        private int expectedFragmentLength;
+        private RecordParser parser;
+
+        @Override
+        public Publisher<Buffer> apply(Flowable<Buffer> upstream) {
+            return Flowable.create(emitter -> {
+                final AtomicReference<Buffer> fullMessageRef = new AtomicReference<>(Buffer.buffer());
+
+                // Initialize parser for XDR framing: first 4 bytes is the record marker
+                parser = RecordParser.newFixed(4);
+
+                parser.handler(buffer -> {
+
+                    if (currentState == RpcParseState.READING_MARKER) {
+                        // We got the 4-byte record marker
+                        long recordMarkerRaw = buffer.getUnsignedInt(0); // Read as unsigned integer
+                        isLastFragment = (recordMarkerRaw & 0x80000000L) != 0;
+                        expectedFragmentLength = (int) (recordMarkerRaw & 0x7FFFFFFF); // Lower 31 bits are the length
+
+                        // System.out.println("Parsed Marker: last=" + isLastFragment + ", length=" + expectedFragmentLength);
+
+                        if (expectedFragmentLength == 0) { // Heartbeat or empty fragment
+                            // Reset to read next marker (RecordParser automatically goes back to fixed(4))
+                            parser.fixedSizeMode(4);
+                            currentState = RpcParseState.READING_MARKER;
+                        } else {
+                            parser.fixedSizeMode(expectedFragmentLength); // Switch to reading fragment data mode
+                            currentState = RpcParseState.READING_FRAGMENT_DATA;
+                        }
+
+                    } else if (currentState == RpcParseState.READING_FRAGMENT_DATA) {
+                        // We got the fragment data
+                        // System.out.println("Received fragment data of length: " + buffer.length());
+                        Buffer completeMessage = fullMessageRef.get();
+                        completeMessage.appendBuffer(buffer);
+
+                        if (isLastFragment) {
+                            //log.info("完整消息: {}", completeMessage.toString());
+                            emitter.onNext(completeMessage); // Emit the complete RPC message
+                            fullMessageRef.set(Buffer.buffer()); // Reset for the next message
+                        }
+                        // Whether it's the last fragment or not, the next should be a record marker
+                        parser.fixedSizeMode(4); // Reset to read next marker
+                        currentState = RpcParseState.READING_MARKER;
+                    }
+                });
+
+                parser.exceptionHandler(emitter::onError);
+
+                // 订阅上游的原始字节流，并将数据喂给 parser
+                upstream.subscribe(
+                        reactiveBuffer -> parser.handle(reactiveBuffer), // 同样需要 getDelegate()
+                        emitter::onError,
+                        emitter::onComplete
+                );
+
+            }, io.reactivex.BackpressureStrategy.BUFFER);
+        }
+    }
+
+    private enum RpcParseState {
+        READING_MARKER,
+        READING_FRAGMENT_DATA
+    }
+}

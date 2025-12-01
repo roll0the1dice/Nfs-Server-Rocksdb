@@ -15,5 +15,6 @@ public class NfsRequestContext {
     private final Nfsv4Server.Nfsv4ConnectionState state;
     private final XdrDecodingStream xdr;
     private int seqid;
+    private long clientId;
     // 未来如果有新参数只需改这里，不用改方法签名
 }
