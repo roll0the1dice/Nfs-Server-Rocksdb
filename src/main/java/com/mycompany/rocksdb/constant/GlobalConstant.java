@@ -15,7 +15,7 @@ public class GlobalConstant {
     // 512
     public static final int SPACE_LEN = (int) SPACE_SIZE / 4096 / 8;
 
-    public static final int VNODE_NUM = 65536;
+    public static final int VNODE_NUM = 65535;
 
     public static final int BLOCK_SIZE_4K = 4 * 1024;
 

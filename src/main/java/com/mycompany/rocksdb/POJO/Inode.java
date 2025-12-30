@@ -111,6 +111,10 @@ public class Inode {
         }
     }
 
+    public long getInodeId() {
+        return nodeId;
+    }
+
     public Inode clone() {
         return  Inode.builder()
                 .mode(mode)
@@ -132,6 +136,39 @@ public class Inode {
                 .build();
     }
 
+    // Add a 'from' method to the builder for copying an existing object
+    public static class InodeBuilder {
+        public InodeBuilder from(Inode other) {
+            this.mode = other.mode;
+            this.cifsMode = other.cifsMode;
+            this.size = other.size;
+            this.nodeId = other.nodeId;
+            this.atime = other.atime;
+            this.mtime = other.mtime;
+            this.ctime = other.ctime;
+            this.createTime = other.createTime;
+            this.atimensec = other.atimensec;
+            this.mtimensec = other.mtimensec;
+            this.ctimensec = other.ctimensec;
+            this.linkN = other.linkN;
+            this.uid = other.uid;
+            this.gid = other.gid;
+            this.majorDev = other.majorDev;
+            this.minorDev = other.minorDev;
+            this.vnodeId = other.vnodeId;
+            this.bucket = other.bucket;
+            this.objName = other.objName;
+            this.versionId = other.versionId;
+            this.reference = other.reference;
+            this.versionNum = other.versionNum;
+            this.storage = other.storage;
+            this.cookie = other.cookie;
+            this.inodeData = other.inodeData;
+            this.updatedChunkFile = other.updatedChunkFile;
+            return this;
+        }
+    }
+
     public static String getKey(String vnode, String bucket, long nodeId) {
         return ROCKS_INODE_PREFIX + vnode + File.separator + bucket + File.separator
                 + nodeId;
@@ -151,7 +188,7 @@ public class Inode {
     @JsonInclude(JsonInclude.Include.NON_DEFAULT)
     @JsonIgnoreProperties(ignoreUnknown = true)
     @Builder
-    public static class InodeData {
+    public static class InodeData implements Cloneable {
         @JsonIgnore
         public long offset;
         public long size;
@@ -168,6 +205,14 @@ public class Inode {
             this.chunkNum = inodeData.chunkNum;
         }
 
+        /**
+         * 实现 clone 方法
+         * 使用拷贝构造函数创建一个新的独立对象
+         */
+        @Override
+        public InodeData clone() {
+            return new InodeData(this);
+        }
 
         public static InodeData newHoleFile(long size) {
             return  InodeData.builder()
@@ -555,5 +600,13 @@ public class Inode {
 
     public LocalDateTime getLastModified() {
         return LocalDateTime.ofEpochSecond(this.mtime, 0, ZoneOffset.UTC);
+    }
+
+    public boolean isDir() {
+        return (this.mode & Mode.S_IFMT.getCode()) == Mode.S_IFDIR.getCode();
+    }
+
+    public boolean isFile() {
+        return (this.mode & Mode.S_IFMT.getCode()) == Mode.S_IFREG.getCode();
     }
 }

@@ -216,8 +216,6 @@ public class Nfsv3Server extends AbstractVerticle {
             }
         });
 
-
-
         // 也可以直接指定端口和主机，而不使用 NetServerOptions
         // server.listen(PORT, HOST, res -> { /* ... */ });
     }
@@ -1031,32 +1029,8 @@ public class Nfsv3Server extends AbstractVerticle {
                 String chunkKey = ChunkFile.getChunkKeyFromChunkFileName(inode.getBucket(), last.fileName);
                 ChunkFile chunkFile = MyRocksDB.getChunkFileMetaData(chunkKey).orElseThrow(() -> new RuntimeException("chunk file not found for chunkKey: " + chunkKey));
 
-                List<Inode.InodeData> overlappingDataSegments = partialRead(chunkFile, readOffset, count);
-
-                if (!overlappingDataSegments.isEmpty()) {
-                    List<byte[]> allData = new ArrayList<>();
-                    for (Inode.InodeData inodeData : overlappingDataSegments) {
-                        if (!StringUtils.isBlank(inodeData.getFileName())) {
-                            FileMetadata fileMetadata = MyRocksDB.getFileMetaData(inodeData.getFileName()).orElseThrow(() -> new RuntimeException("readChunk failed..."));
-                            List<Long> offsets = fileMetadata.getOffset();
-                            List<Long> lens = fileMetadata.getLen();
-
-                            List<byte[]> dataList = readSegment(offsets, lens, inodeData.size);
-                            byte[] tmpData = mergeWithByteBuffer(dataList);
-
-                            // 1. 创建一个大小为 size 的新数组
-                            byte[] resultData = new byte[(int) inodeData.size];
-                            // 2. 使用 System.arraycopy() 进行复制
-                            System.arraycopy(tmpData, (int) inodeData.offset, resultData, 0, (int) inodeData.size);
-
-                            allData.add(resultData);
-                        } else {
-                            byte[] byteArray = new byte[(int)inodeData.size];
-                            allData.add(byteArray);
-                        }
-                    }
-
-                    byte[] data = mergeWithByteBuffer(allData);
+                try {
+                    byte[] data = FSUtils.readRangeOptimized(inode.getBucket(), chunkFile.getChunkList(), readOffset, count);
                     int dataLength = data.length / 4 * 4 + 4;
 
                     PostOpAttr fileAttributes = PostOpAttr.builder()
@@ -1073,12 +1047,11 @@ public class Nfsv3Server extends AbstractVerticle {
                             .build();
 
                     read3resOptinal = Optional.of(READ3res.createOk(read3resok));
-                } else {
+                } catch (Exception e) {
                     PostOpAttr fileAttributes = PostOpAttr.builder().attributesFollow(0).build();
                     READ3resfail read3resfail = READ3resfail.builder().fileAttributes(fileAttributes).build();
                     read3resOptinal = Optional.of(READ3res.createFail(NfsStat3.NFS3ERR_IO, read3resfail));
                 }
-
             } else {
                 PostOpAttr fileAttributes = PostOpAttr.builder().attributesFollow(0).build();
                 READ3resfail read3resfail = READ3resfail.builder().fileAttributes(fileAttributes).build();
@@ -1109,31 +1082,6 @@ public class Nfsv3Server extends AbstractVerticle {
         return fullResponseBuffer.array();
     }
 
-    public static List<byte[]> readSegment(List<Long> offsets, List<Long> lens, long size) throws IOException {
-        if (!Paths.get(MyRocksDB.FILE_DATA_DEVICE_PATH).toFile().exists()) {
-            log.error("No such path exists...");
-            throw new IOException("No such path exists...");
-        }
-
-        List<byte[]> result = new ArrayList<>();
-
-        for (int i = 0; i < offsets.size(); i++) {
-            long offset = offsets.get(i);
-            long length = lens.get(i);
-
-            try(FileChannel fileChannel = FileChannel.open(Paths.get(MyRocksDB.FILE_DATA_DEVICE_PATH), StandardOpenOption.READ)) {
-                ByteBuffer buffer = ByteBuffer.allocate((int)length);
-                fileChannel.read(buffer, offset);
-                buffer.flip();
-                byte[] data = new byte[buffer.remaining()];
-                buffer.get(data);
-
-                result.add(data);
-            }
-        }
-
-        return result;
-    }
 
     public static void createData(List<Inode.InodeData> list, Inode.InodeData data, Inode inode, byte[] dataToWrite) throws JsonProcessingException {
         // 把普通 inodeData 转换为 chunk

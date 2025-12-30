@@ -1,0 +1,98 @@
+    private Buffer handleCreateSession(int xid, NetSocket socket, Nfsv4ConnectionState state, XdrDecodingStream xdr) {
+        log.info("Handling NFSv4 EXCHANGE_ID operation for xid: {}", Integer.toUnsignedString(xid));
+        try {
+            // Decode EXCHANGE_ID arguments (simplified for now)
+            long clientid = xdr.readLong(); // Skip EXCHANGE_ID arguments for now
+            int seqid = xdr.readInt();
+            int csa_flags = xdr.readInt();
+            int csa_fore_chan_attrs_hdr_pad_size = xdr.readInt();
+            int csa_fore_chan_attrs_max_req_size = xdr.readInt();
+            int csa_fore_chan_attrs_max_resq_size = xdr.readInt();
+            int csa_fore_chan_attrs_max_resq_size_cached = xdr.readInt();
+            int csa_fore_chan_attrs_max_ops = xdr.readInt();
+            int csa_fore_chan_attrs_max_reqs = xdr.readInt();
+            int csa_back_chan_attrs_hdr_pad_size = xdr.readInt();
+            int csa_back_chan_attrs_max_req_size = xdr.readInt();
+            int csa_back_chan_attrs_max_resq_size = xdr.readInt();
+            int csa_back_chan_attrs_max_resq_size_cached = xdr.readInt();
+            int csa_back_chan_attrs_max_ops = xdr.readInt();
+            int csa_back_chan_attrs_max_reqs = xdr.readInt();
+            int cb_program = xdr.readInt();
+            int flavor = xdr.readInt();
+            int stamp = xdr.readInt();
+            int machine_name_length = xdr.readInt();
+            Buffer machine_name = xdr.readFixedOpaque(machine_name_length);
+            int uid = xdr.readInt();
+            int gid = xdr.readInt();
+
+            // Build the EXCHANGE_ID response
+            Buffer response = buildCreateSessionReply(xid);
+            //socket.write(response);
+            return response;
+        } catch (Exception e) {
+            log.error("Error handling EXCHANGE_ID operation: ", e);
+            sendRpcError(xid, socket, RpcConstants.GARBAGE_ARGS);
+            // Ensure we always return a Buffer to satisfy the method contract.
+            return Buffer.buffer();
+        }
+    }
+
+    private Buffer buildExchangeIdReply(int requestXid, Buffer majorId) {
+        Buffer rpcHeaderBuffer = getReplyHeader(requestXid);
+
+        // EXCHANGE_ID specific response payload
+        Buffer rpcBodyBuffer = Buffer.buffer();
+
+        // EID4_SERVER_OWNER
+        XdrUtils.writeLong(rpcBodyBuffer, 0x00020001L); 
+        XdrUtils.writeInt(rpcBodyBuffer, 0);
+        XdrUtils.writeLong(rpcBodyBuffer, 0);    // Minor ID
+        XdrUtils.writeOpaque(rpcBodyBuffer, majorId.getBytes()); // Major ID
+        XdrUtils.writeOpaque(rpcBodyBuffer, majorId.getBytes()); // Server Scope
+        XdrUtils.writeInt(rpcBodyBuffer, 0); // sei_impl_id4 length = 0
+
+
+        final int rpcMessageBodyLength = rpcBodyBuffer.length() + rpcHeaderBuffer.length();
+        int recordMarkValue = 0x80000000 | rpcMessageBodyLength;
+
+        Buffer fullResponseBuffer = Buffer.buffer();
+        fullResponseBuffer.appendInt(recordMarkValue);
+        fullResponseBuffer.appendBuffer(rpcHeaderBuffer);
+        fullResponseBuffer.appendBuffer(rpcBodyBuffer);
+
+        return fullResponseBuffer;
+    }
+
+
+        private Buffer buildCreateSessionReply(int requestXid) {
+        Buffer rpcHeaderBuffer = getReplyHeader(requestXid);
+
+        // EXCHANGE_ID specific response payload
+        Buffer rpcBodyBuffer = Buffer.buffer();
+
+        // EID4_SERVER_OWNER
+        XdrUtils.writeLong(rpcBodyBuffer, 0x00000002L); 
+        XdrUtils.writeInt(rpcBodyBuffer, 0);
+        XdrUtils.writeLong(rpcBodyBuffer, 1049620);    
+        XdrUtils.writeLong(rpcBodyBuffer, 1049480);
+        XdrUtils.writeLong(rpcBodyBuffer, 2128);
+        XdrUtils.writeLong(rpcBodyBuffer, 8);
+        XdrUtils.writeLong(rpcBodyBuffer, 30);
+        XdrUtils.writeInt(rpcBodyBuffer, 0);
+        XdrUtils.writeLong(rpcBodyBuffer, 4096);    
+        XdrUtils.writeLong(rpcBodyBuffer, 4096);
+        XdrUtils.writeLong(rpcBodyBuffer, 0);
+        XdrUtils.writeLong(rpcBodyBuffer, 2);
+        XdrUtils.writeLong(rpcBodyBuffer, 16);
+
+
+        final int rpcMessageBodyLength = rpcBodyBuffer.length() + rpcHeaderBuffer.length();
+        int recordMarkValue = 0x80000000 | rpcMessageBodyLength;
+
+        Buffer fullResponseBuffer = Buffer.buffer();
+        fullResponseBuffer.appendInt(recordMarkValue);
+        fullResponseBuffer.appendBuffer(rpcHeaderBuffer);
+        fullResponseBuffer.appendBuffer(rpcBodyBuffer);
+
+        return fullResponseBuffer;
+    }

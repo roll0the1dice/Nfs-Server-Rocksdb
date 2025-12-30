@@ -16,6 +16,7 @@ import reactor.util.function.Tuple4;
 import reactor.util.function.Tuples;
 
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -53,8 +54,9 @@ public class TMain {
 //                    System.out.println("objects: " + objects);
 //                });
 
-        List<Long> link = Arrays.asList(31312L);
-        saveRedis("4436", "fs-SP0-2", link, "0002");
+        // List<Long> link = Arrays.asList(31312L);
+        // saveRedis("4436", "fs-SP0-2", link, "0002");
+        System.out.println(Paths.get("/tmp/smb2_share", "/").toString());
 
     }
 

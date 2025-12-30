@@ -44,6 +44,9 @@ public class FileMetadata {
     @JsonProperty("metaKey")
     private String metaKey;
 
+    @JsonProperty("logicalOffset")
+    private long logicalOffset;
+
     public String getKey() {
         return fileName;
     }
