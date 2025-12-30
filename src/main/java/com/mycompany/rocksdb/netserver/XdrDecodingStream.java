@@ -17,10 +17,13 @@ public class XdrDecodingStream {
         return buffer.getInt();
     }
 
+<<<<<<< HEAD
     public boolean readBoolean() {
         return buffer.getInt() == 1;
     }
 
+=======
+>>>>>>> 82c35694aa92253fd9c7d0c5119e5e75ab8825be
     public long readLong() {
         return buffer.getLong();
     }

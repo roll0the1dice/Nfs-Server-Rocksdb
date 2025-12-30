@@ -16,11 +16,9 @@ public class App {
         VertxOptions options = new VertxOptions()
         // 设置阻塞检查间隔（单位：毫秒），默认是 2000
         .setBlockedThreadCheckInterval(1000 * 60 * 60); // 设置为 1 小时，基本就没警告了
-            Vertx vertx = Vertx.vertx(options);
+        Vertx vertx = Vertx.vertx();
 
-         vertx.deployVerticle(new PortMapperServer());
-         vertx.deployVerticle(new MountServer());
-         vertx.deployVerticle(new Nfsv3Server());
+        // vertx.deployVerticle(new PortMapperServer());
         // vertx.deployVerticle(new Nfsv4Server());
         //vertx.deployVerticle(new Smb2Server());
     }

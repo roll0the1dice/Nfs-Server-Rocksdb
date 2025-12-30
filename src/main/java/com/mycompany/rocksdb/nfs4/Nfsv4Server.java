@@ -1629,6 +1629,7 @@ public class Nfsv4Server extends AbstractVerticle {
             return serverOwner;
         }
 
+<<<<<<< HEAD
         public void setClientMinorId(int clientMinorId) {
             this.clientMinorId = clientMinorId;
         }
@@ -1637,6 +1638,8 @@ public class Nfsv4Server extends AbstractVerticle {
             return clientMinorId;
         }
 
+=======
+>>>>>>> 82c35694aa92253fd9c7d0c5119e5e75ab8825be
         public void setClientMajorId(String clientMajorId) {
             this.clientMajorId = clientMajorId;
         }
@@ -1645,6 +1648,7 @@ public class Nfsv4Server extends AbstractVerticle {
             return clientMajorId;
         }
 
+<<<<<<< HEAD
         public void setSessionIdHigh(long sessionIdHigh) {
             this.sessionIdHigh = sessionIdHigh;
         }
@@ -1659,6 +1663,14 @@ public class Nfsv4Server extends AbstractVerticle {
 
         public long getSessionIdLow() {
             return sessionIdLow;
+=======
+        public void setClientMinorId(int clientMinorId) {
+            this.clientMinorId = clientMinorId;
+        }
+
+        public int getClientMinorId() {
+            return clientMinorId;
+>>>>>>> 82c35694aa92253fd9c7d0c5119e5e75ab8825be
         }
 
         public void setOwnerId(String ownerId) {

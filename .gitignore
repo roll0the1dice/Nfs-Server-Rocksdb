@@ -5,3 +5,4 @@ fs-*
 dev*
 $dev*
 dev$sdb1
+*.pcap

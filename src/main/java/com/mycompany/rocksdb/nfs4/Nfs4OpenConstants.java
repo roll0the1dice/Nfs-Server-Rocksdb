@@ -9,7 +9,11 @@ public class Nfs4OpenConstants {
     // open_flag4 (oa_type)
     public static final int OPEN4_CREATE_NONE = 0;
     public static final int OPEN4_CREATE = 1;
+<<<<<<< HEAD
     public static final int OPEN4_NOCREATE = 0;
+=======
+    public static final int OPEN4_NOCREATE = 2;
+>>>>>>> 82c35694aa92253fd9c7d0c5119e5e75ab8825be
 
     // create_mode4 (create_how)
     public static final int OPEN4_CREATE_UNCHECKED = 0; // Check for existence but don't fail on non-existence
