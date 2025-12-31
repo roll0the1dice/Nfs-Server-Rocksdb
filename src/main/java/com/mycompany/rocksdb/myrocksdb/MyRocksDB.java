@@ -1040,7 +1040,7 @@ public class MyRocksDB {
 
             versionIndexMetadata.get().setInode(inode.getNodeId());
             versionIndexMetadata.get().setCookie(inode.getNodeId()+1L);
-            versionIndexMetadata.get().setInodeObject(inode);
+            //versionIndexMetadata.get().setInodeObject(inode);
 
             // 插入元数据
             LatestIndexMetadata latestIndexMetadata = VersionIndexMetadata.toLatestIndexMetadata(versionIndexMetadata.get());
@@ -1484,7 +1484,7 @@ public class MyRocksDB {
             newInode.setObjName(newPath);
             newVersionIndexMetadata.setKey(newPath);
             //newVersionIndexMetadata.setObject(newPath);
-            newVersionIndexMetadata.setInodeObject(newInode);
+            //newVersionIndexMetadata.setInodeObject(newInode);
 
             // 5. 生成新路径对应的各种 Key
             String newVersionKey = MetaKeyUtils.getVersionMetaDataKey(targetVnodeId, bucket, newPath, newVersionIndexMetadata.getVersionId());

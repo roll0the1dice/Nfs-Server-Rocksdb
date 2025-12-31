@@ -14,6 +14,7 @@ import com.mycompany.rocksdb.enums.Nfs3Constant;
 import com.mycompany.rocksdb.enums.Nfs3Procedure;
 import com.mycompany.rocksdb.enums.NfsStat3;
 import com.mycompany.rocksdb.enums.RpcConstants;
+import com.mycompany.rocksdb.logical.LogicalMetadataManager;
 import com.mycompany.rocksdb.model.*;
 import com.mycompany.rocksdb.model.acl.GETACL3res;
 import com.mycompany.rocksdb.model.acl.GETACL3resfail;
@@ -62,7 +63,7 @@ import static com.mycompany.rocksdb.utils.NetTool.bytesToHex2;
 public class Nfsv3Server extends AbstractVerticle {
     private static final Logger log = LoggerFactory.getLogger(MountServer.class);
 
-    private static final int PORT = 12345; // 服务器监听的端口
+    private static final int PORT = 2049; // 服务器监听的端口
     private static final String HOST = "0.0.0.0"; // 监听所有网络接口
 
     private RpcParseState currentState = RpcParseState.READING_MARKER;
@@ -164,7 +165,7 @@ public class Nfsv3Server extends AbstractVerticle {
                     isLastFragment = (recordMarkerRaw & 0x80000000L) != 0;
                     expectedFragmentLength = (int) (recordMarkerRaw & 0x7FFFFFFF); // 低31位是长度
 
-                    System.out.println("Parsed Marker: last=" + isLastFragment + ", length=" + expectedFragmentLength);
+                    //System.out.println("Parsed Marker: last=" + isLastFragment + ", length=" + expectedFragmentLength);
 
                     if (expectedFragmentLength == 0) { // 可能是心跳或空片段
                         // 重置为读取下一个标记 (RecordParser 自动回到 fixed(4))
@@ -177,7 +178,7 @@ public class Nfsv3Server extends AbstractVerticle {
 
                 } else if (currentState == RpcParseState.READING_FRAGMENT_DATA) {
                     // 我们得到了片段数据
-                    System.out.println("Received fragment data of length: " + buffer.length());
+                    //System.out.println("Received fragment data of length: " + buffer.length());
                     messageFragments.add(buffer);
 
                     if (isLastFragment) {
@@ -221,7 +222,7 @@ public class Nfsv3Server extends AbstractVerticle {
     }
 
     private void handleRpcRequest(NetSocket netSocket) {
-        System.out.println("Processing complete message with " + messageFragments.size() + " fragments.");
+        //System.out.println("Processing complete message with " + messageFragments.size() + " fragments.");
         if (messageFragments.isEmpty()) {
             System.out.println("Received an empty RPC message.");
             // 处理空消息，如果协议允许
@@ -231,7 +232,7 @@ public class Nfsv3Server extends AbstractVerticle {
             for (Buffer fragment : messageFragments) {
                 fullMessage.appendBuffer(fragment);
             }
-            System.out.println("Full message length: " + fullMessage.length());
+            //System.out.println("Full message length: " + fullMessage.length());
             // 在这里反序列化和处理 fullMessage
             // e.g., MyRpcResponse response = XDR.decode(fullMessage, MyRpcResponse.class);
             String receivedData = fullMessage.toString("UTF-8");
@@ -282,7 +283,7 @@ public class Nfsv3Server extends AbstractVerticle {
             int procedureNumber = rpcHeader.getProcedureNumber();
 
             log.info("NFS Request - XID: 0x{}, Program: {}, Version: {}, Procedure: {}",
-                    (Object) Integer.toHexString(xid), Optional.of(programNumber), Optional.of(programVersion), Optional.of(procedureNumber));
+                    (Object) Integer.toHexString(xid), Optional.of(programNumber), Optional.of(programVersion), (Nfs3Procedure)EnumUtil.fromCode(Nfs3Procedure.class, procedureNumber));
 
             // Verify this is an NFS request
             if (programNumber != NFS_PROGRAM || programVersion != NFS_VERSION) {
@@ -667,7 +668,9 @@ public class Nfsv3Server extends AbstractVerticle {
 
             List<Inode.InodeData> list = inode.getInodeData();
             if (list.isEmpty() && inode.getSize() > 0) {
-                createHole(list, Inode.InodeData.newHoleFile(newAttributes.getSize().getSize()), inode);
+                String physicalFilename = MetaKeyUtils.getObjFileName(inode.getBucket(), inode.getObjName(), MetaKeyUtils.getRequestId());
+                String vnodeId = MetaKeyUtils.getTargetVnodeId(inode.getBucket());
+                LogicalMetadataManager.handleNewFileInitialMapping(inode, physicalFilename, newAttributes.getSize().getSize(), 0L, vnodeId);
             }
 
             MyRocksDB.saveINodeMetaData(MetaKeyUtils.getTargetVnodeId(BUCK_NAME), inode);
@@ -938,71 +941,6 @@ public class Nfsv3Server extends AbstractVerticle {
         return fullResponseBuffer.array();
     }
 
-     /**
-        * @param dataList 字节数组列表
-        * @return 合并后的单个字节数组
-     */
-    public static byte[] mergeWithByteBuffer(List<byte[]> dataList) {
-        // 1. 计算总长度（与方法一相同）
-        int totalLength = 0;
-        for (byte[] array : dataList) {
-            totalLength += array.length;
-        }
-
-        // 2. 分配一个具有总长度的 ByteBuffer
-        ByteBuffer buffer = ByteBuffer.allocate(totalLength);
-
-        // 3. 将每个数组放入 buffer 中
-        for (byte[] array : dataList) {
-            buffer.put(array);
-        }
-
-        // 4. 从 buffer 中获取底层的完整数组
-        return buffer.array();
-    }
-
-    public static List<Inode.InodeData> partialRead(ChunkFile chunkFile, long readOffset, long readSize) {
-        List<Inode.InodeData> result = new ArrayList<>();
-        long curOffset = 0L;
-        long readEnd = readOffset + readSize;
-
-        long calOffset = 0;
-        for (Inode.InodeData cur : chunkFile.getChunkList()) {
-            //cur.offset = calOffset;
-            //calOffset += cur.size;
-
-            long curEnd = curOffset + cur.size;
-
-            // 当前块完全在读取区间左侧，跳过
-            if (curEnd <= readOffset) {
-                curOffset = curEnd;
-                continue;
-            }
-
-            // 当前块完全在读取区间右侧，结束
-            if (curOffset >= readEnd) {
-                break;
-            }
-//         [2169661,    3145728]
-//            [3076096, 3145728]
-            // 计算重叠区间
-            long overlapStart = Math.max(curOffset, readOffset);
-            long overlapEnd = Math.min(curEnd, readEnd);
-
-            if (overlapStart < overlapEnd) {
-                // 构造只包含重叠部分的新 InodeData
-                Inode.InodeData part = new Inode.InodeData(cur);
-                part.offset = overlapStart - curOffset;
-                part.size = overlapEnd - overlapStart;
-                result.add(part);
-            }
-
-            curOffset = curEnd;
-        }
-
-        return result;
-    }
-
     private byte[] createNfsReadReply(int xid, Buffer request, int startOffset) throws IOException {
         // Parse file handle, offset, and count from request
         int fhandleLength = request.getInt(startOffset);
@@ -1030,7 +968,7 @@ public class Nfsv3Server extends AbstractVerticle {
                 ChunkFile chunkFile = MyRocksDB.getChunkFileMetaData(chunkKey).orElseThrow(() -> new RuntimeException("chunk file not found for chunkKey: " + chunkKey));
 
                 try {
-                    byte[] data = FSUtils.readRangeOptimized(inode.getBucket(), chunkFile.getChunkList(), readOffset, count);
+                    byte[] data = FSUtils2.readRangeOptimized(inode.getBucket(), chunkFile.getChunkMap(), readOffset, count);
                     int dataLength = data.length / 4 * 4 + 4;
 
                     PostOpAttr fileAttributes = PostOpAttr.builder()
@@ -1082,85 +1020,6 @@ public class Nfsv3Server extends AbstractVerticle {
         return fullResponseBuffer.array();
     }
 
-
-    public static void createData(List<Inode.InodeData> list, Inode.InodeData data, Inode inode, byte[] dataToWrite) throws JsonProcessingException {
-        // 把普通 inodeData 转换为 chunk
-        String targetVnodeId = MetaKeyUtils.getTargetVnodeId(inode.getBucket());
-
-        String chunkKey = ChunkFile.getChunkKey(targetVnodeId, data.fileName);
-        Inode.InodeData chunk = ChunkFile.newChunk(data.fileName, data, inode);
-        ChunkFile chunkFile = ChunkFile.builder().nodeId(inode.getNodeId()).bucket(inode.getBucket()).objName(inode.getObjName())
-                .versionId(inode.getVersionId()).versionNum(MetaKeyUtils.getVersionNum()).size(data.size).chunkList(new ArrayList<>()).hasDeleteFiles(new LinkedList<>()).build();
-
-        chunkFile.getChunkList().add(data);
-        list.add(chunk);
-
-        chunkFile.setSize(data.size);
-        inode.setSize(data.size);
-
-        MyRocksDB.saveINodeMetaData(targetVnodeId, inode);
-        // 关联 - chunkKey - chunk - chunkFile
-        MyRocksDB.saveChunkFileMetaData(chunkKey, chunkFile);
-
-        String verisonKey = MetaKeyUtils.getVersionMetaDataKey(targetVnodeId, inode.getBucket(), inode.getObjName(), null);
-        MyRocksDB.saveFileMetaData(data.fileName, verisonKey, dataToWrite, dataToWrite.length, true);
-    }
-
-    public static void createHole(List<Inode.InodeData> list, Inode.InodeData holeFile, Inode inode) throws JsonProcessingException {
-        String holeFileName = MetaKeyUtils.getHoleFileName(inode.getBucket(), getRequestId());
-        String chunkKey = ChunkFile.getChunkKey(holeFileName);
-        Inode.InodeData chunk = ChunkFile.newChunk(holeFileName, holeFile, inode);
-        ChunkFile chunkFile = ChunkFile.builder().nodeId(inode.getNodeId()).bucket(inode.getBucket()).objName(inode.getObjName())
-                .versionId(inode.getVersionId()).versionNum(MetaKeyUtils.getVersionNum()).size(holeFile.size).chunkList(new ArrayList<>()).hasDeleteFiles(new LinkedList<>()).build();
-
-        chunkFile.getChunkList().add(holeFile);
-        list.add(chunk);
-
-        chunkFile.setSize(holeFile.size);
-        inode.setSize(holeFile.size);
-
-        String targetVnodeId = MetaKeyUtils.getTargetVnodeId(inode.getBucket());
-        MyRocksDB.saveINodeMetaData(targetVnodeId, inode);
-        // 关联 - chunkKey - chunk - chunkFile
-        MyRocksDB.saveChunkFileMetaData(chunkKey, chunkFile);
-    }
-
-    public static void appendData(List<Inode.InodeData> list, Inode.InodeData data, Inode inode, byte[] dataToWrite) throws JsonProcessingException {
-        if (list.isEmpty()) {
-            if (StringUtils.isBlank(data.fileName)) {
-                createHole(list ,data, inode);
-            } else {
-                createData(list, data, inode, dataToWrite);
-            }
-        }
-        else {
-            Inode.InodeData last = list.get(list.size() - 1);
-            String chunkKey = ChunkFile.getChunkKeyFromChunkFileName(inode.getBucket(), last.fileName);
-            ChunkFile chunkFile = MyRocksDB.getChunkFileMetaData(chunkKey).orElseThrow(() -> new RuntimeException("chunk file not found..."));
-            chunkFile.getChunkList().add(data);
-            MyRocksDB.saveChunkFileMetaData(chunkKey, chunkFile);
-
-            String targetVnodeId = MetaKeyUtils.getTargetVnodeId(inode.getBucket());
-            if (StringUtils.isNotBlank(data.fileName) && dataToWrite != null) {
-                // String vnodeId = data.fetchInodeDataTargetVnodeId();
-                // List<Long> link = Arrays.asList(((long) Long.parseLong(vnodeId)));
-                // String s_uuid = "0001";
-                // MyRocksDB.saveRedis(vnodeId, link, s_uuid);
-
-                String verisonKey = MetaKeyUtils.getVersionMetaDataKey(targetVnodeId, inode.getBucket(), inode.getObjName(), null);
-                MyRocksDB.saveFileMetaData(data.fileName, verisonKey, dataToWrite, dataToWrite.length, true);
-            }
-
-            last.setSize(last.getSize() + data.size);
-            inode.setSize(inode.getSize() + data.size);
-            chunkFile.setSize(chunkFile.getSize() + data.size);
-            last.setChunkNum(chunkFile.getChunkList().size());
-
-            MyRocksDB.saveINodeMetaData(targetVnodeId, inode);
-            MyRocksDB.saveChunkFileMetaData(chunkKey, chunkFile);
-        }
-    }
-
     public static String calculateMD5(byte[] data) {
         try {
             MessageDigest digest = MessageDigest.getInstance("MD5");
@@ -1199,47 +1058,7 @@ public class Nfsv3Server extends AbstractVerticle {
             FAttr3 attributes = inode.toFAttr3();
             String object = inode.getObjName();
 
-            String filename = MetaKeyUtils.getObjFileName(BUCK_NAME, object, getRequestId());
-
-            Inode.InodeData inodeData = new Inode.InodeData();
-            inodeData.offset = reqOffset;
-            inodeData.size = dataOfLength;
-            inodeData.fileName = filename;
-            inodeData.etag = calculateMD5(dataToWrite);
-            inodeData.storage = "dataa";
-
-            List<Inode.InodeData> list = inode.getInodeData();
-            long reqEnd = reqOffset + count;
-            // 如果写入的位置大于文件的末端
-            if (reqOffset >= inode.getSize()) {
-                if (reqOffset > inode.getSize()) {
-                    appendData(list, Inode.InodeData.newHoleFile(reqOffset - inode.getSize()), inode, dataToWrite);
-                    appendData(list, inodeData, inode, dataToWrite);
-                }
-                // 恰好追加
-                else {
-                    appendData(list, inodeData, inode, dataToWrite);
-                }
-            }
-            // 新加入的 inodeata 与 原来的数据有交集
-            else {
-                Inode.InodeData last = list.get(list.size() - 1);
-                String chunkKey = ChunkFile.getChunkKeyFromChunkFileName(inode.getBucket(), last.fileName);
-                ChunkFile chunkFile = MyRocksDB.getChunkFileMetaData(chunkKey).orElseThrow(() -> new RuntimeException("chunk file not found..."));
-                long updatedtotalSize = Inode.partialOverwrite3(chunkFile, reqOffset, inodeData);
-
-                String targetVnodeId = MetaKeyUtils.getTargetVnodeId(inode.getBucket());
-                String verisonKey = MetaKeyUtils.getVersionMetaDataKey(targetVnodeId, inode.getBucket(), inode.getObjName(), inode.getVersionId());
-                MyRocksDB.saveFileMetaData(inodeData.fileName, verisonKey, dataToWrite, dataToWrite.length, true);
-
-                chunkFile.setSize(chunkFile.getSize() + updatedtotalSize);
-                inode.setSize(chunkFile.getSize() + updatedtotalSize);
-                last.setChunkNum(chunkFile.getChunkList().size());
-                last.setSize(chunkFile.getSize() + updatedtotalSize);
-
-                MyRocksDB.saveINodeMetaData(targetVnodeId, inode);
-                MyRocksDB.saveChunkFileMetaData(chunkKey, chunkFile);
-            }
+            FSUtils2.writeRangeOptimized(inode.getBucket(), inode.getObjName(), reqOffset, count, dataToWrite, inode);
 
             FAttr3 attritbutes = inode.toFAttr3();
 
@@ -1698,7 +1517,15 @@ public class Nfsv3Server extends AbstractVerticle {
 
     private byte[] createNfsFSInfoReply(int xid) throws IOException {
         // Standard ONC RPC reply header
-        ByteBuffer rpcHeaderBuffer = RpcUtil.createAcceptedSuccessReplyHeaderBuffer(xid);
+        ByteBuffer rpcHeaderBuffer = null;
+        try {
+            rpcHeaderBuffer = RpcUtil.createAcceptedSuccessReplyHeaderBuffer(xid);
+        } catch (Exception e) {
+            // TODO: handle exception
+            e.printStackTrace();
+        }
+
+        assert rpcHeaderBuffer != null;
 
         // NFS FSINFO reply
         NfsStat3 status = NfsStat3.NFS3_OK;
@@ -1827,9 +1654,8 @@ public class Nfsv3Server extends AbstractVerticle {
                             String chunkKey = ChunkFile.getChunkKeyFromChunkFileName(inode.getBucket(), inodeData.fileName);
                             ChunkFile chunkFile = MyRocksDB.getChunkFileMetaData(chunkKey).orElseThrow(() -> new org.rocksdb.RocksDBException("Could not find chunkFile for " + chunkKey));
                             
-                            List<Inode.InodeData> chunkList = chunkFile.getChunkList();
-                            for (Inode.InodeData realData : chunkList) {
-                                MyRocksDB.deleteFile(realData.fileName);
+                            for (Map.Entry<Long, Inode.InodeData> firstEntry : chunkFile.getChunkMap().entrySet()) {
+                                MyRocksDB.deleteFile(firstEntry.getValue().getFileName());
                             }
 
                             MyRocksDB.deleteChunkFileMetaData(chunkKey);

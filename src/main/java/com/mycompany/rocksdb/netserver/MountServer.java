@@ -34,7 +34,7 @@ public class MountServer extends AbstractVerticle {
     private static final int MOUNT_FLAVORS = 1;
     private static final int MOUNT_FLAVOR_AUTH_UNIX = 1;
 
-    private static final int PORT = 23333; // 服务器监听的端口
+    private static final int PORT = 20048; // 服务器监听的端口
     private static final String HOST = "0.0.0.0"; // 监听所有网络接口
 
     private RpcParseState currentState = RpcParseState.READING_MARKER;

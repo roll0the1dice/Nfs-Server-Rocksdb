@@ -30,7 +30,20 @@ public class ChunkFile {
     public LinkedList<String> hasDeleteFiles = new LinkedList<>(); // 已删除文件列表
     public long size;                      // 总大小
 
-    List<Inode.InodeData> chunkList = new LinkedList<>();    // 分块元数据列表
+    //List<Inode.InodeData> chunkList = new LinkedList<>();    // 分块元数据列表
+    // 核心优化：直接存储 TreeMap
+    // Key 是该段在当前 ChunkFile 内部的相对逻辑起始偏移量
+    private NavigableMap<Long, Inode.InodeData> chunkMap = new TreeMap<>();
+
+
+    /**
+     * 获取当前块的总大小 (O(1) 优化)
+     */
+    public long getActualSize() {
+        if (chunkMap.isEmpty()) return 0L;
+        Long lastKey = chunkMap.lastKey();
+        return lastKey + chunkMap.get(lastKey).size;
+    }
 
     /**
      * 通过 chunk 文件名（chunkFileName），解析出 nodeId、bucket、chunkKey 等关键信息。

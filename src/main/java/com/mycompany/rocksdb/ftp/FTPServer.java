@@ -915,7 +915,7 @@ public class FTPServer extends AbstractVerticle {
                     String chunkKey = ChunkFile.getChunkKeyFromChunkFileName(inode.getBucket(), inodeData.fileName);
                     ChunkFile chunkFile = MyRocksDB.getChunkFileMetaData(chunkKey).orElseThrow(() -> new org.rocksdb.RocksDBException("Could not find chunkFile for " + chunkKey));
 
-                    List<Inode.InodeData> chunkList = chunkFile.getChunkList();
+                    List<Inode.InodeData> chunkList = new ArrayList<>(); // chunkFile.getChunkList();
 
                     for (Inode.InodeData realData : chunkList) {
                         MyRocksDB.deleteFile(realData.fileName);

@@ -23,7 +23,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.mycompany.rocksdb.myrocksdb.MyRocksDB;
-import com.mycompany.rocksdb.utils.FSUtils;
 import com.mycompany.rocksdb.utils.MetaKeyUtils;
 import com.mycompany.rocksdb.POJO.ChunkFile;
 import com.mycompany.rocksdb.POJO.Inode; // Import Inode
@@ -36,6 +35,7 @@ import com.mycompany.rocksdb.nfs4.Nfs4OpenConstants; // Import Nfs4OpenConstants
 import com.mycompany.rocksdb.nfs4.Nfs4StateId; // Import Nfs4StateId
 
 import java.util.Map;
+import java.util.NavigableMap;
 import java.util.Optional; // Import Optional
 
 import java.nio.file.Paths; // Import Paths
@@ -1159,7 +1159,7 @@ public class Nfsv4Server extends AbstractVerticle {
             //     }
             // }
             List<Inode.InodeData> flattenedList = new LinkedList<>();
-            flattenInodeStructure(inode.getBucket(), inode.getInodeData(), flattenedList);
+            //flattenInodeStructure(inode.getBucket(), inode.getInodeData(), flattenedList);
             Iterator<Inode.InodeData> segmentIterator = flattenedList.iterator();
             Buffer dataBuffer = Buffer.buffer();
             while (segmentIterator.hasNext()) {
@@ -1170,7 +1170,7 @@ public class Nfsv4Server extends AbstractVerticle {
                 }
                 // B. 实际数据处理 (零拷贝封装)
                 else {
-                    byte[] rawData = FSUtils.readSegmentDataFromRocksDB(segment);
+                    byte[] rawData = new byte[0]; //FSUtils.readSegmentDataFromRocksDB(segment);
                     dataBuffer = Buffer.buffer(rawData);
                 }
             }
@@ -1197,13 +1197,17 @@ public class Nfsv4Server extends AbstractVerticle {
         }
     }
 
-    public void flattenInodeStructure(String bucket, List<Inode.InodeData> currentList, List<Inode.InodeData> resultList) {
-        if (currentList == null) return;
-        for (Inode.InodeData item : currentList) {
+    public void flattenInodeStructure(String bucket, NavigableMap<Long, Inode.InodeData> currentMap, List<Inode.InodeData> resultList) {
+        if (currentMap == null) return;
+        
+        // TreeMap 保证了遍历是按 Offset 顺序进行的
+        for (Map.Entry<Long, Inode.InodeData> entry : currentMap.entrySet()) {
+            Inode.InodeData item = entry.getValue();
             if (item.fileName != null && item.fileName.startsWith(ROCKS_CHUNK_FILE_KEY)) {
                 String chunkKey = ChunkFile.getChunkKeyFromChunkFileName(bucket, item.fileName);
-                ChunkFile chunkFile = MyRocksDB.getChunkFileMetaData(chunkKey).orElse(null);
-                if (chunkFile != null) flattenInodeStructure(bucket, chunkFile.getChunkList(), resultList);
+                MyRocksDB.getChunkFileMetaData(chunkKey).ifPresent(cf -> {
+                    flattenInodeStructure(bucket, cf.getChunkMap(), resultList);
+                });
             } else {
                 resultList.add(item);
             }
@@ -1629,7 +1633,6 @@ public class Nfsv4Server extends AbstractVerticle {
             return serverOwner;
         }
 
-<<<<<<< HEAD
         public void setClientMinorId(int clientMinorId) {
             this.clientMinorId = clientMinorId;
         }
@@ -1638,8 +1641,6 @@ public class Nfsv4Server extends AbstractVerticle {
             return clientMinorId;
         }
 
-=======
->>>>>>> 82c35694aa92253fd9c7d0c5119e5e75ab8825be
         public void setClientMajorId(String clientMajorId) {
             this.clientMajorId = clientMajorId;
         }
@@ -1648,7 +1649,6 @@ public class Nfsv4Server extends AbstractVerticle {
             return clientMajorId;
         }
 
-<<<<<<< HEAD
         public void setSessionIdHigh(long sessionIdHigh) {
             this.sessionIdHigh = sessionIdHigh;
         }
@@ -1663,14 +1663,6 @@ public class Nfsv4Server extends AbstractVerticle {
 
         public long getSessionIdLow() {
             return sessionIdLow;
-=======
-        public void setClientMinorId(int clientMinorId) {
-            this.clientMinorId = clientMinorId;
-        }
-
-        public int getClientMinorId() {
-            return clientMinorId;
->>>>>>> 82c35694aa92253fd9c7d0c5119e5e75ab8825be
         }
 
         public void setOwnerId(String ownerId) {

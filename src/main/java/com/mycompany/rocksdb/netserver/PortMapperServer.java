@@ -18,7 +18,7 @@ public class PortMapperServer extends AbstractVerticle {
     // <-- MODIFIED: Logger 应该关联当前类，而不是 MyRocksDB
     private static final Logger log = LoggerFactory.getLogger(PortMapperServer.class);
 
-    private static final int RPCBIND_PORT = 11111;
+    private static final int RPCBIND_PORT = 111;
     private static final int PORTMAPPER_PROGRAM = 100000;
     private static final int PORTMAPPER_VERSION = 2;
     private static final int PMAPPROC_GETPORT = 3;
@@ -67,8 +67,8 @@ public class PortMapperServer extends AbstractVerticle {
     @Override
     public void start(Future<Void> startFuture) {
         // 预注册服务
-        registerService(100003, 3, IPPROTO_TCP, 12345);
-        registerService(100005, 3, IPPROTO_TCP, 23333);
+        registerService(100003, 3, IPPROTO_TCP, 2049);
+        registerService(100005, 3, IPPROTO_TCP, 20048);
 
         // --- TCP Server ---
         NetServerOptions options = new NetServerOptions()
@@ -157,14 +157,34 @@ public class PortMapperServer extends AbstractVerticle {
             int version = request.getInt(16);
             int procedure = request.getInt(20);
 
+            // --- 动态解析开始 ---
+            int currentPos = 24;
+
+            // 1. 跳过 Credentials
+            int credFlavor = request.getInt(currentPos);
+            int credLength = request.getInt(currentPos + 4);
+            // RPC 规定必须 4 字节对齐
+            int credPadding = (4 - (credLength % 4)) % 4;
+            currentPos += 8 + credLength + credPadding;
+
+            // 2. 跳过 Verifier
+            int verfFlavor = request.getInt(currentPos);
+            int verfLength = request.getInt(currentPos + 4);
+            int verfPadding = (4 - (verfLength % 4)) % 4;
+            currentPos += 8 + verfLength + verfPadding;
+
+            // 现在 currentPos 指向了真正的数据参数区 (Procedure Parameters)
+            // --- 动态解析结束 ---
+
             if (msgType == MSG_TYPE_CALL &&
                     program == PORTMAPPER_PROGRAM &&
                     version == PORTMAPPER_VERSION &&
                     procedure == PMAPPROC_GETPORT) {
 
-                int progToLookup = request.getInt(40);
-                int versToLookup = request.getInt(44);
-                int protToLookup = request.getInt(48);
+                // 使用动态计算的偏移量
+                int progToLookup = request.getInt(currentPos);
+                int versToLookup = request.getInt(currentPos + 4);
+                int protToLookup = request.getInt(currentPos + 8);
 
                 log.info("GETPORT request: XID=0x{}, Prog=0x{}, Vers={}, Prot={}",
                         Integer.toHexString(xid), Integer.toHexString(progToLookup), versToLookup, protToLookup);

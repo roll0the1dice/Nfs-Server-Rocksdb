@@ -6,8 +6,15 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.Arrays;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import com.mycompany.rocksdb.netserver.MountServer;
+
 @Data
 public class CredentialsInRPC {
+    private static final Logger log = LoggerFactory.getLogger(CredentialsInRPC.class);
+
     private int Stamp; // start of body
     private int machineNameLength;
     private String machineName;
@@ -53,7 +60,7 @@ public class CredentialsInRPC {
             this.auxiliaryGID0 = buffer.getInt();
 
             if (buffer.hasRemaining()) {
-                System.err.println("Warning: " + buffer.remaining() + " unparsed bytes remaining in credentialsData.");
+                log.warn("Warning: " + buffer.remaining() + " unparsed bytes remaining in credentialsData.");
             }
         } catch (Exception e) {
             throw new IllegalArgumentException("Invalid machineNameLength: " + this.machineNameLength, e);

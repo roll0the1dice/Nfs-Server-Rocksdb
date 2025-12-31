@@ -2,7 +2,6 @@ package com.mycompany.rocksdb.ftp;
 
 import com.mycompany.rocksdb.POJO.Inode;
 import com.mycompany.rocksdb.myrocksdb.MyRocksDB;
-import com.mycompany.rocksdb.storage.InodeWriteUtils;
 import com.mycompany.rocksdb.utils.MetaKeyUtils;
 import io.reactivex.subjects.ReplaySubject;
 import io.reactivex.subjects.Subject;
@@ -84,7 +83,7 @@ public class PutObjectTask {
                 if (inodeOptional.isPresent()) {
                     Inode inode = inodeOptional.get();
 
-                    InodeWriteUtils.processWriteRequest(inode, this.offset, inodeData, buffer, targetVnodeId);
+                    //InodeWriteUtils.processWriteRequest(inode, this.offset, inodeData, buffer, targetVnodeId);
 
                     promise.complete(true); // 成功
                 } else {

@@ -1,11 +1,16 @@
 package com.mycompany.rocksdb.utils;
 
 import com.mycompany.rocksdb.enums.RpcConstants;
+import com.mycompany.rocksdb.netserver.MountServer;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 public class RpcUtil {
+  private static final Logger log = LoggerFactory.getLogger(RpcUtil.class);
   /**
    * 将标准的RPC成功响应头部写入给定的ByteBuffer。
    * 调用者需要确保ByteBuffer有足够的剩余空间，并且其字节序已设置。
@@ -34,10 +39,19 @@ public class RpcUtil {
    * @return 一个新的ByteBuffer，包含了头部数据，并已准备好读取 (flipped)
    */
   public static ByteBuffer createAcceptedSuccessReplyHeaderBuffer(int xid) {
-    ByteBuffer headerBuffer = ByteBuffer.allocate(RpcConstants.RPC_ACCEPTED_REPLY_HEADER_LENGTH);
-    headerBuffer.order(ByteOrder.BIG_ENDIAN);
-    writeAcceptedSuccessReplyHeader(headerBuffer, xid);
-    headerBuffer.flip(); // 准备好被读取或发送
-    return headerBuffer;
+    try {
+      ByteBuffer headerBuffer = ByteBuffer.allocate(RpcConstants.RPC_ACCEPTED_REPLY_HEADER_LENGTH);
+      //log.info("ByteBuffer headerBuffer = ByteBuffer.allocate(RpcConstants.RPC_ACCEPTED_REPLY_HEADER_LENGTH);");
+      headerBuffer.order(ByteOrder.BIG_ENDIAN);
+      //log.info("headerBuffer.order(ByteOrder.BIG_ENDIAN);");
+      writeAcceptedSuccessReplyHeader(headerBuffer, xid);
+      //log.info("writeAcceptedSuccessReplyHeader(headerBuffer, xid);");
+      headerBuffer.flip(); // 准备好被读取或发送
+      //log.info("headerBuffer.flip();");
+      return headerBuffer;
+    } catch (Exception e) {
+      log.error("Error in createAcceptedSuccessReplyHeaderBuffer", e);  // 打印栈迹
+      throw e;  // 或返回 null，根据需要
+    }
   }
 }

@@ -4,7 +4,6 @@ import com.mycompany.rocksdb.POJO.ChunkFile;
 import com.mycompany.rocksdb.POJO.FileMetadata;
 import com.mycompany.rocksdb.POJO.Inode;
 import com.mycompany.rocksdb.myrocksdb.MyRocksDB;
-import com.mycompany.rocksdb.utils.FSUtils;
 
 import io.vertx.core.Handler;
 import io.vertx.core.Vertx;
@@ -47,7 +46,7 @@ public class DFSInodeReadStream implements ReadStream<Buffer> {
         // 1. 在构造时先扁平化元数据 (Flatten)
         // 注意：如果层级特别深，建议把 flatten 也做成异步的，这里为了简化展示设为同步
         List<Inode.InodeData> flattenedList = new LinkedList<>();
-        FSUtils.flattenInodeStructure(inode.getBucket(), inode.getInodeData(), flattenedList);
+        //FSUtils.flattenInodeStructure(inode.getBucket(), inode.getInodeData(), flattenedList);
         this.segmentIterator = flattenedList.iterator();
     }
 
@@ -86,7 +85,7 @@ public class DFSInodeReadStream implements ReadStream<Buffer> {
                 }
                 // B. 实际数据处理 (零拷贝封装)
                 else {
-                    byte[] rawData = FSUtils.readSegmentDataFromRocksDB(segment);
+                    byte[] rawData = new byte[0]; // FSUtils.readSegmentDataFromRocksDB(segment);
                     buffer = Buffer.buffer(rawData);
                 }
                 promise.complete(buffer);
